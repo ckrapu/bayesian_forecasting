@@ -3,6 +3,7 @@ import bayesian_forecasting as bf
 from utilities import *
 import pandas as pd
 import numpy as np
+from scipy.linalg import block_diag
 import numpy.testing as npt
 
 class TestCases(unittest.TestCase):
@@ -16,14 +17,16 @@ class TestCases(unittest.TestCase):
         sigma = 0.05
         initial = 0.1
         length = 1000
+        
         y,F = simulate_and_data_matrix_arp(coefficients,sigma,length,initial)
+        print F.shape
         G = np.identity(order)
         W = np.identity(order) * sigma
         V = 0.1
         Y = y
         m0 = np.ones(order)*0.5
         C0 = np.identity(order) * 0.25
-        ffbs = bf.FFBS(F,G,V,Y,m0,C0,W=W,evolution_discount =False)
+        ffbs = bf.FFBS(F[:,:,np.newaxis],G,V,Y,m0,C0,W=W,evolution_discount =False)
         ffbs.forward_filter()
         ffbs.backward_smooth()
         sample = ffbs.backward_sample()
@@ -42,7 +45,7 @@ class TestCases(unittest.TestCase):
         The mean absolute deviation (i.e. the forecast error in degrees C)
         should be less than 4.0 for the last 10 years of the record."""
         
-        sample_data = parseMopex('./sample_data/brookings.csv')
+        sample_data = parse_mopex('./sample_data/brookings.csv')
         sample_data = sample_data.dropna(axis = 0)
         monthly = sample_data.groupby(pd.TimeGrouper('m')).mean()
         ld = np.log(monthly['discharge'])
@@ -69,7 +72,7 @@ class TestCases(unittest.TestCase):
         matrix W.Rhe mean absolute deviation (i.e. the forecast error in degrees C)
         should be less than 4.0 for the last 10 years of the record."""
         
-        sample_data = parseMopex('./sample_data/brookings.csv')
+        sample_data = parse_mopex('./sample_data/brookings.csv')
         sample_data = sample_data.dropna(axis = 0)
         monthly = sample_data.groupby(pd.TimeGrouper('m')).mean()
         ld = np.log(monthly['discharge'])
@@ -107,7 +110,7 @@ class TestCases(unittest.TestCase):
         m0 = np.ones(2)
         m0[1] = 0.3
         
-        states,emissions = univariate_dlm_simulation(static_F,G,W,v,m0,n,r,T)
+        states,emissions = univariate_dlm_simulation(static_F,G,W,v,m0,n,T)
         F = static_F[np.newaxis,:].repeat(T,axis = 0)[:,:,np.newaxis]
         C0 = np.identity(n)
         polynomial_ffbs = bf.FFBS(F,G,v,emissions,m0,C0,evolution_discount = False,W = W)
@@ -118,6 +121,35 @@ class TestCases(unittest.TestCase):
         mae_error = np.mean(np.abs(estimated_states[:,1] - states[:,1]))
         self.assertTrue(mae_error < 5.0)
         
+    def test_composite(self):
+        """ This test case parses and loads some MOPEX hydrology data and applies
+        a dynamic regression, a constant and an AR1 model component."""
+        mopex = parse_mopex('./sample_data/01372500.dly')
+        mopex = water_year_means(mopex)
+        forcings = mopex[['precipitation','pet','max_temp','min_temp']]
+        forcings['past_discharge'] = np.roll(mopex['discharge'],1)
+        forcings['precipitation_squared'] = forcings['precipitation']**2
+        forcings = forcings.iloc[1::]
+        observations = mopex['discharge'].iloc[1::]
+        assert np.any(np.isnan(forcings)) == False
+        T = forcings.shape[0]
+
+        # F_regression has shape (T,n_regression)
+        F_regression = forcings.values
+
+        # F_polynomial has shape [T,poly_order]
+        F_polynomial = np.asarray([1,0])[np.newaxis,:].repeat(T,axis = 0)
+        F_constant = np.asarray([1])[:,np.newaxis].repeat(T,axis = 0)
+        F = np.hstack([F_regression,F_constant])[:,:,np.newaxis]
+        n = F.shape[1]
+        G = block_diag(*([1.0]*7))
+        v = 0.2
+        assert G.shape[0] == n
+
+        ffbs = bf.FFBS(F,G,v,observations.values,np.ones(n) * 0.1, np.identity(n) * 0.01,deltas = [0.99])
+        ffbs.forward_filter()
+        ffbs.backward_smooth()
+        self.assertTrue(ffbs.mae < 0.3)
         
 if __name__ == '__main__':
     unittest.main()
