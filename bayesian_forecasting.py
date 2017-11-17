@@ -1,4 +1,6 @@
 import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.metrics import r2_score
 
 class FFBS_sample(object):
     """An FFBS_sample object is used as a sampling step in a PyMC3 model 
@@ -217,6 +219,8 @@ class FFBS(object):
             except:
                 print 'NaN values encountered in forward filtering.'
         self.is_filtered = True
+        self.mae = np.mean(np.abs(self.e))
+        self.r2 = r2_score(self.Y,self.f)
         
     def backward_smooth(self):
         
@@ -292,5 +296,61 @@ class FFBS(object):
             self.simulated_state[t] = np.random.multivariate_normal(simulation_mean,simulation_cov)
 
         return self.simulated_state
+    
+    
+    def pred_vs_obs_plot(self):
+        """ Wrapper for scatter plot showing the predicted
+        versus observed values"""
+        
+        assert self.is_filtered
+        
+        low = min([np.min(self.f),np.min(self.Y)]) * 0.9
+        high = max([np.max(self.f),np.max(self.Y)])* 1.1
+        plt.figure(figsize = (6,6))
+        plt.scatter(self.f,self.Y,color='k')
+        plt.ylabel('Predicted',fontsize = 14)
+        plt.xlabel('Observed',fontsize = 14)
+        plt.xlim([low,high])
+        plt.ylim([low,high])
+        plt.plot([low,high],[low,high],linestyle='--',color = 'k')
+        plt.gca().set_aspect('equal', adjustable='box')
+        
+        return plt.gca()
+    
+    def time_plot(self):
+        """Wrapper for a plot showing the forecasted values with 90% 
+        confidence interval and the observed values. The first timestep
+        is ignored in order to avoid distortion from misspecified 
+        variance."""
+        
+        deviations = np.squeeze(np.sqrt(self.Q) * 1.645)
+        upper = np.squeeze(self.f)+deviations
+        lower = np.squeeze(self.f)-deviations
+        
+        plt.figure(figsize = (10,6))
+        plt.plot(self.f,linestyle='-',color='k',label='1-step forecast')
+        plt.plot(self.Y,color='r',linestyle='',marker='o',label='Observed')
+        plt.gca().fill_between(np.arange(len(deviations)),upper,lower,color='0.8',label='90% CI')
+        plt.xlim([1,len(deviations)])
+        plt.legend(loc='upper right')
+        return plt.gca()
+
+    def residual_plot(self):
+        """Wrapper for plot comparing the residuals / forecast errors
+        against the observations. A horizontal line is added at residual = 0
+        in order to aid visual identification of heteroscedasticity."""
+        
+        plt.figure(figsize = (6,6))
+        low  = np.min(self.Y) * 0.9
+        high = np.max(self.Y)* 1.1
+
+        plt.scatter(self.Y,self.e,color = 'k')
+        plt.ylabel('Residual',fontsize = 14)
+        plt.xlabel('Observed',fontsize = 14)
+        plt.plot([low,high],[0,0],linestyle='--',color = 'k')
+       
+        return plt.gca()
+
+        
 
 

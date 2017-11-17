@@ -258,7 +258,7 @@ def water_year_means(df):
     annual = monthly.groupby(monthly['water_year']).mean().iloc[1:-1]
     return annual.drop(['year','month'],axis=1).set_index('water_year')
 
-def parseMopex(filename):
+def parse_mopex(filename):
     """ Since the MOPEX hydrology dataset uses a fixed-character field scheme,
     this function just takes care of parsing it, replacing the -99999 
     values with NaNs and setting the correct time index."""
