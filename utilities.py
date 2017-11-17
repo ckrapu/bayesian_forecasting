@@ -5,10 +5,20 @@ import theano.tensor as tt
 from theano.compile.ops import as_op
 import theano
 from scipy.stats import invgamma,genextreme
-import matplotlib.pyplot as plt
 from ipywidgets import IntProgress, HTML, VBox
 from IPython.display import display
 import numpy as np
+from scipy.linalg import circulant
+import matplotlib.pyplot as plt
+import ulmo
+import sys
+
+
+def matrix_normal(M,U,V):
+    """Syntactic sugar for a matrix-variate normal distribution with mean 
+    matrix M, column/left covariance matrix U and row/right covariance
+    matrix V."""
+    return numpy.random.multivariate_normal(M.ravel(), np.kron(V, U)).reshape(M.shape)
 
 
 def simulate_and_data_matrix_arp(coefficients,sigma = 0.5,length = 100,initial = 1.0,bias = 0.0):
@@ -44,6 +54,107 @@ def simulate_and_data_matrix_arp(coefficients,sigma = 0.5,length = 100,initial =
     # As the index ranges from 0,...,p, the lag ranges from newest,...,oldest
     return y,F
 
+
+# TODO: Write unit eigenvalue test to keep bad coefficient values from being set.
+
+def simulate_and_data_matrix_varp(coef_tensor,cov_matrix,length,initial):
+    """Convenience function wrapping together VAR(p) simulation
+    along with the creation of a regression tensor of lagged values. 
+    Note that the coefficient matrix for the most recent lag should be placed first
+    in the tensor 'coef_tensor'."""
+    
+    try:
+        p = coef_tensor.shape[2]
+    except IndexError:
+        p = 1
+    
+    # We'll make the Y matrix a little longer (in the time dimension)
+    # than it needs to be so we can later throw out values which won't
+    # have accompanying lagged data in the regression tensor.
+    Y = generate_varp(coef_tensor,cov_matrix,length+p,initial)
+    F = data_matrix_varp_stack(Y,p)
+    
+    # The first p entries of Y were only needed to provide lagged data to 
+    # prime the following timesteps.
+    return Y[p::,:],F
+    
+def generate_varp(coef_tensor,cov_matrix,length,initial):
+    """Use this function to simulate a VAR(p) process over 'length' timesteps
+    for an r-dimensional time series with static parameters. 'coef_tensor' must 
+    be an array with shape[r,r,p] and 'cov_matrix' must be an array with shape [r,r]
+    relating the innovations across different entries in the vector time series.
+    Also, the coefficient array passed to this function should have the most recent
+    lag coefficients come before the coefficients for lag values in the more distant past.
+    In practice, this means that the slice 'coef_tensor[:,:,0]' corresponds to the p = 1 lag
+    while the slice 'coef_tensor[:,:,10]' corresponds to the p = 10 lag.
+    
+    The ordering of the dimensions for coef_tensor should look like:
+    [out_index,in_index,time] where out_index denotes that this index runs over regression outputs
+    while in_index runs over regression inputs. Therefore, an index of 2,3,4 denotes
+    the regression coefficient relating the contribution of the 3rd series to the 2nd series at 
+    time lag 4."""
+    
+    # We first want to make sure the coefficient matrix we've received is 
+    # square in its first two dimensions.
+    try:
+        assert coef_tensor.shape[0]==coef_tensor.shape[1]
+    except AssertionError:
+        print 'Coefficient tensor is not square in first two dimensions.'
+        
+    try:
+        p = coef_tensor.shape[2]
+    except IndexError:
+        p = 1
+    
+    r = coef_tensor.shape[0]
+    
+    y = np.empty([length,r])
+    
+    # We'll sample all our errors at once. Innovations should be of dimension length x r
+    innovations = np.random.multivariate_normal(np.zeros(r),cov_matrix,size = length)
+    
+    for t in range(length):
+        
+        # If the timestep is less than the VAR(p) order, then there won't be enough
+        # previous data to build a lagged data set
+        if t < p:
+            y[t,:] = initial
+        else:
+            # We snap off a block of recent values
+            # with shape [r,p].
+            recent_y_matrix = y[t-p:t,:]
+            
+            # Since the time index runs like low:high implies past:recent,
+            # we need to invert the time axis because the coefficient tensor
+            # has a time index running like low:high implies recent:past,
+            # i.e. p=1 comes first
+            reversed_recent = np.flipud(recent_y_matrix)
+            
+                      
+            # Then, we use einsum to perform a tensor contraction 
+            # and then we add the innovations.
+            
+            y[t,:] = np.einsum('ikj,jk->i',coef_tensor,reversed_recent) + innovations[t,:]
+            
+    return y
+
+def data_matrix_varp_stack(Y,p):
+    """ This function takes in an r-dimensional time series 'y' and
+    rearranges/repeats the data to create a regression tensor of 
+    lag 1, lag 2, ... lag 'order' values for use in an autoregression
+    fitting procedure."""
+    
+    r = Y.shape[1]
+    T = Y.shape[0]
+    F = np.zeros([T,p,r])
+    for i in range(p):
+        # We'll add a slice of data lagged by 'i' timesteps.
+        F[:,i,:] = np.roll(Y,i+1,axis = 0) 
+    return F[p::,::-1,:]
+    
+    
+
+
 def data_matrix_arp_stack(y,p):
     """ This function takes in a 1-dimensional time series 'y' and
     rearranges/repeats the data to create a regression matrix of 
@@ -57,6 +168,15 @@ def data_matrix_arp_stack(y,p):
     
     return F[p::,:]
 
+def data_matrix_arp_circulant(y,p):
+    """ This function takes in a 1-dimensional time series 'y' and
+    rearranges/repeats the data to create a regression matrix of 
+    lag 1, lag 2, ... lag 'order' values for use in an autoregression
+    fitting procedure. This function is conceptually cleaner but much 
+    more memory intensive than data_matrix_arp_stack."""
+    
+    circ = circulant(y).T
+    return circ[0:p,p-1:-1].T
 
 def arp_simulation(coefficients,sigma,length,initial = 1.0,bias = 0.0):
     """Simulate a 1-dimensional AR(p) process of duration 'length'
@@ -83,13 +203,16 @@ def arp_simulation(coefficients,sigma,length,initial = 1.0,bias = 0.0):
         y[i] = coefficients.dot(y[i-p:i]) + innovations[i]
     return y
 
-def univariate_dlm_simulation(F,G,W,v,initial_state,n,r,T):
+def univariate_dlm_simulation(F,G,W,v,initial_state,n,T):
     """This function is used to simulate a univariate DLM with static
-    parameters F,G,W,v."""
+    parameters F,G,W,v. The initial state for the state vector is 
+    specified with 'initial_state'. 'n' and 'T' are the 
+    dimensions of the state vector and the number of timesteps
+    desired, respectively. """
     
     ZEROS = np.zeros(n)
     
-    emissions    = np.zeros([T,r])
+    emissions    = np.zeros([T,1])
     state        = np.zeros([T,n])
     
     state[0]     = initial_state
@@ -118,6 +241,7 @@ def parseMopex(filename):
     data = data.set_index(pd.to_datetime(data[['year','month','day']]))
     data = data.replace(to_replace=-99.0000,value=np.nan)
     return data.drop('date',axis = 1)
+
 def retrieveGridmetSeries(latitude,longitude,bufferInMeters = 5000,
                           seriesToDownload = ['pr','pet','tmmn','tmmx'],
                           startDate = '1979-01-01',endDate   = '2016-12-31',
@@ -188,7 +312,40 @@ def tsSamplesPlot(tsSamples,timeIndex = None,upperPercentile = 95, lowerPercenti
         plt.plot(timeIndex,median,color='k',linewidth = 3,label = 'Median',axes=ax)
     return ax
 
+def get_ghcn_data(upper_latitude,lower_latitude,left_longitude,right_longitude,country=None,element = 'TMAX'):
+    """ This is a wrapper designed to make retreiving daily data from the GHCN database 
+    more streamlined. Specify 'element' as one of PRCP, TMAX, TMIN, SNOW or SNWD. Other codes 
+    might be retrievable too - see ftp://ftp.ncdc.noaa.gov/pub/data/ghcn/daily/readme.txt for 
+    more details. If locations within the specified coordinate box are desired only from a 
+    specific country, then use the keyword argument 'country' to restrict to those locations. 
+    This function returns a dataframe in which each column corresponds to the desired weather 
+    variable for a single station and the index runs over daily timesteps.
+    """
     
+    assert lower_latitude < upper_latitude
+    assert left_longitude < right_longitude
+    
+    # Because this API is unpatriotic and doesn't love the full name of our wonderful homeland.
+    if country == 'USA':
+        country = 'US'
+    
+    stations = pd.DataFrame(ulmo.ncdc.ghcn_daily.get_stations(country=country,elements=element))
+    print 'Retrieving {0} data for {1} stations.'.format(element,stations.shape[1])
+    stations = stations.transpose()
+    sys.stdout.flush()
+    subset_stations = stations[stations.latitude.between(lower_latitude,upper_latitude) & stations.longitude.between(left_longitude,right_longitude)]
+    
+    frames = []
+    
+    for station_id in log_progress(subset_stations.index,every=1):
+        frame = ulmo.ncdc.ghcn_daily.get_data(station_id,elements = element,as_dataframe=True)[element][['value']]
+        frame.columns = [station_id]
+        frames.append(frame)
+    
+    merged = pd.concat(frames,axis = 1)
+    
+    return merged   
+  
   
     
     
