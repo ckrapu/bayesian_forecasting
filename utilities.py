@@ -129,11 +129,9 @@ def generate_varp(coef_tensor,cov_matrix,length,initial):
             # has a time index running like low:high implies recent:past,
             # i.e. p=1 comes first
             reversed_recent = np.flipud(recent_y_matrix)
-            
-                      
+                     
             # Then, we use einsum to perform a tensor contraction 
             # and then we add the innovations.
-            
             y[t,:] = np.einsum('ikj,jk->i',coef_tensor,reversed_recent) + innovations[t,:]
             
     return y
@@ -226,12 +224,45 @@ def univariate_dlm_simulation(F,G,W,v,initial_state,n,T):
         
     
 def permutation_matrix(order):
+    """Produces a permutation matrix
+    with dimension 'order'."""
     matrix = np.zeros([order,order])
     matrix[-1,0] = 1
     matrix[0:-1,1::] = np.identity(order-1)
     return matrix
 
+def polynomial_matrix(order):
+    """Produces a matrix useful for including
+    a polynomial component of order 'order' in G 
+    for a DLM."""
+    
+    matrix = np.identity(order)
+    for i in range(order-1):
+        matrix[i,i+1] = 1
+    return matrix
+    
+def water_year_means(df):
+    """This function takes in a daily timestep indexed dataframe 'df'
+    and takes the group mean with the groups defined by the water year
+    of the observation. For example, the water year for 2002 is given 
+    by October 1, 2001 through September 31, 2002."""
+
+    monthly = df.groupby(pd.TimeGrouper('M')).mean()
+    monthly['year'] = monthly.index.year
+    monthly['month'] = monthly.index.month
+    monthly['water_year'] = np.roll(monthly['year'],-3)
+    
+    # Because there will typically not be data starting and ending in
+    # October, we will need to drop the first and last years as we have
+    # incomplete records for the first and last year respectively.
+    annual = monthly.groupby(monthly['water_year']).mean().iloc[1:-1]
+    return annual.drop(['year','month'],axis=1).set_index('water_year')
+
 def parseMopex(filename):
+    """ Since the MOPEX hydrology dataset uses a fixed-character field scheme,
+    this function just takes care of parsing it, replacing the -99999 
+    values with NaNs and setting the correct time index."""
+    
     columnNames = ['date','precipitation','pet','discharge','max_temp','min_temp']
 
     data = pd.read_csv(filename,sep=r"[ ]{2,}",names=columnNames)

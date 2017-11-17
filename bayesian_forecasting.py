@@ -134,8 +134,8 @@ class FFBS(object):
             # 1/delta. We just invert a diagonal matrix to get that.
             self.discount_matrix = np.linalg.inv(np.diag(deltas))
 
-            else:
-                raise ValueError('Evolution discount factors incorrectly specified.')
+        else:
+            raise ValueError('Evolution discount factors incorrectly specified.')
 
        
        
