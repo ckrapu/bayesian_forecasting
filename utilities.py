@@ -1,3 +1,7 @@
+import itertools
+import shapely
+import fiona
+import geopandas as gpd
 from oauth2client.client import GoogleCredentials
 import ee
 import pandas as pd
@@ -13,9 +17,62 @@ import matplotlib.pyplot as plt
 import ulmo
 import sys
 
+from pymc3.distributions.dist_math import bound
+
+
+
+def gaussianKernel(dist,c):
+    return np.exp(-(dist)**2/(2*c**2))
+
+def quadraticKernel(dist,c):
+    return 1.0/(c*dist**2)
+
+def euclidDist(pair1,pair2):
+    """ Just computes the euclidean distance between
+    two tuples, i.e. two latitude/longitude pairs"""
+    return ((pair1[0]-pair2[0])**2+(pair1[1]-pair2[1])**2)**0.5
+
+def createK(obsSites,kernelSites,kernel=gaussianKernel,dist=euclidDist,d=4):
+    """ Will fill this in later"""
+    r = len(obsSites)
+    n = len(kernelSites)
+    K = np.zeros([r,n])
+    for i in range(r):
+        for j in range(n):
+            K[i,j] = kernel(dist(obsSites[i],kernelSites[j]),d)
+    return K
+
+
+
+def gev_ll(loc,c,scale):
+    """Since PyMC3 has no out-of-the-box solution for GEV-distributed data,
+    this function can be used in conjunction with DensityDist to calculate
+    the contributions of GEV variables to the log likelihood. The way that
+    this works is that when 'gev_ll' is called with some parameters, a 
+    function is returned. Credit goes to Adrian Seyboldt
+    (https://github.com/aseyboldt) for writing this code."""
+    
+    def gev_logp(value):
+        scaled = (value - loc) / scale
+        logp = -(scale
+                 + ((c + 1) / c) * tt.log1p(c * scaled)
+                 + (1 + c * scaled) ** (-1/c))
+        alpha = loc - scale / c
+        
+        # If the value is greater than zero, then check to see if 
+        # it is greater than alpha. Otherwise, check to see if it 
+        # is less than alpha.
+        bounds = tt.switch(value > 0, value > alpha, value < alpha)
+        
+        # The returned array will have entries of -inf if the bound
+        # is not satisfied. This condition says "if c is zero or
+        # value is less than alpha, return -inf and blow up 
+        # the log-likelihood.
+        return bound(logp, bounds, c != 0)
+    return gev_logp
 
 def matrix_normal(M,U,V):
-    """Syntactic sugar for a matrix-variate normal distribution with mean 
+    """ Wrapper for a matrix-variate normal distribution with mean 
     matrix M, column/left covariance matrix U and row/right covariance
     matrix V."""
     return numpy.random.multivariate_normal(M.ravel(), np.kron(V, U)).reshape(M.shape)
@@ -26,9 +83,7 @@ def simulate_and_data_matrix_arp(coefficients,sigma = 0.5,length = 100,initial =
     along with the creation of a regression matrix of lagged values. 
     Note that the coefficient for the farthest-back lag should be placed first
     in the array 'coefficients'."""
-    
-    
-    
+       
     # We will make a data vector which is a little too long because
     # some values will need to be thrown out to make the dimension of
     # a lagged data matrix match up with the dimension of y
@@ -343,7 +398,7 @@ def tsSamplesPlot(tsSamples,timeIndex = None,upperPercentile = 95, lowerPercenti
         plt.plot(timeIndex,median,color='k',linewidth = 3,label = 'Median',axes=ax)
     return ax
 
-def get_ghcn_data(upper_latitude,lower_latitude,left_longitude,right_longitude,country=None,element = 'TMAX'):
+def get_ghcn_data(upper_latitude,lower_latitude,left_longitude,right_longitude,country=None,element = 'TMAX',**kwargs):
     """ This is a wrapper designed to make retreiving daily data from the GHCN database 
     more streamlined. Specify 'element' as one of PRCP, TMAX, TMIN, SNOW or SNWD. Other codes 
     might be retrievable too - see ftp://ftp.ncdc.noaa.gov/pub/data/ghcn/daily/readme.txt for 
@@ -360,12 +415,12 @@ def get_ghcn_data(upper_latitude,lower_latitude,left_longitude,right_longitude,c
     if country == 'USA':
         country = 'US'
     
-    stations = pd.DataFrame(ulmo.ncdc.ghcn_daily.get_stations(country=country,elements=element))
-    print 'Retrieving {0} data for {1} stations.'.format(element,stations.shape[1])
+    stations = pd.DataFrame(ulmo.ncdc.ghcn_daily.get_stations(country=country,elements=element,**kwargs))
+    
     stations = stations.transpose()
     sys.stdout.flush()
     subset_stations = stations[stations.latitude.between(lower_latitude,upper_latitude) & stations.longitude.between(left_longitude,right_longitude)]
-    
+    print 'Retrieving {0} data for {1} stations.'.format(element,subset_stations.shape[1])
     frames = []
     
     for station_id in log_progress(subset_stations.index,every=1):
@@ -375,9 +430,69 @@ def get_ghcn_data(upper_latitude,lower_latitude,left_longitude,right_longitude,c
     
     merged = pd.concat(frames,axis = 1)
     
-    return merged   
+    return merged,subset_stations   
+
+def grid_in_shape(up_lat,low_lat,left_long,right_long,shape,
+                  lat_resolution=15,long_resolution=60):
+    """This function takes the bounding box of a grid with
+    specified longitudinal and latitudinal resolution 
+    along with a shapely shape and returns the grid points
+    that are located within that shape, as a geodataframe.""" 
+      
+    longitudes = np.linspace(left_long,right_long,60)
+    latitudes  = np.linspace(low_lat,up_lat,15)
+    prods = list(itertools.product(longitudes,latitudes))
+    points = [shapely.geometry.Point(point) for point in prods]
+    points_within = [point for point in points if shape.contains(point)]
+    points_gdf = gpd.GeoDataFrame(geometry = points_within)
+    
+    return points_gdf
   
-  
+def multi_impute_maxes(frame,daily_limit = 15,annual_limit = 1,
+                max_nan_per_year = 60):
+    """ This function combines imputation at the daily 
+    and annual timescale for a pandas dataframe indexed
+    by a daily timestamp. First, it makes a pass over the 
+    data and fills gaps of length up to 2 x 'daily_limit'
+    by equal amounts of backward and forward fill. Then,
+    If there are more than 'max_nan_per_year NaNs remaining 
+    in a year,that year is flagged as an NaN year and 
+    an additional step of forward and backward filling
+    is applied to fill gaps of length 2 x 'annual_limit.
+    Any columns which have remaining NaN values are 
+    dropped from the returned matrix."""
+    
+    n_columns_original = frame.shape[1]
+    
+    # We first do a backward/forward fill to cover gaps up 
+    # to 2*daily_limit days.
+    frame_bfill = frame.fillna(method='bfill',limit = daily_limit)
+    frame_ffill = frame_bfill.fillna(method='ffill',limit = daily_limit)
+
+    # We then compute a semi-processed maxima dataframe. 
+    frame_max   = frame_ffill.groupby(pd.TimeGrouper('A')).max()
+
+    # Furthermore, we want to NaN out any years for which there are 
+    # too many unobserved days.
+    nans_per_year = np.isnan(frame).groupby(pd.TimeGrouper('A')).sum()
+
+    # If there are too many NaNs in that year, we drop that year.
+    max_nan_per_year = 60
+    is_year_allowed = nans_per_year < max_nan_per_year # Boolean array
+    frame_max[~is_year_allowed] = np.nan
+
+    # Next, we back/forward fill 'annual_limit' years. 
+    # Any stations which still have missing data 
+    # remaining are dropped from further analysis.
+    max_bfill    = frame_max.fillna(method='bfill',limit = annual_limit)
+    max_ffill    = max_bfill.fillna(method='ffill',limit = annual_limit)
+    max_dropped  = max_ffill.dropna(axis=1)
+    
+    n_dropped = max_dropped.shape[1] - n_columns_original
+    print 'Out of {0} columns, {1} were dropped.'.format(n_columns_original,
+                                                        n_dropped)
+    
+    return max_dropped
     
     
 def inverseGammaVisualize(alpha,beta):
@@ -397,7 +512,6 @@ def pdf_weibull(x,alpha,beta):
 
     
 def log_progress(sequence, every=None, size=None, name='Items'):
-
 
     is_iterator = False
     if size is None:
@@ -450,23 +564,4 @@ def log_progress(sequence, every=None, size=None, name='Items'):
             name=name,
             index=str(index or '?')
         ) 
-    
-    
-def observed_vs_medians_gev_plot(trace,observed):
-    
-    dim0,dim1,dim2 = trace['mus'].shape
-    
-    sigma_reshaped = trace['sigma'][:,np.newaxis].repeat(dim1,axis=1)[:,:,np.newaxis].repeat(dim2,axis=2)
-    xi_reshaped = trace['xi'][:,np.newaxis].repeat(dim1,axis=1)[:,:,np.newaxis].repeat(dim2,axis=2)
-    medians = genextreme.median(-xi_reshaped,loc=trace['mus'],scale=sigma_reshaped)
-    
-    numMedians = len(medians.ravel())
-    numObserved = len(observed.values.ravel())
-    
-    plt.figure(figsize = (8,5))
-    sns.kdeplot(medians.ravel(),color='r',label = 'Monte Carlo medians (n = {0})'.format(numMedians))
-    sns.kdeplot(observed.values.ravel(),color='b',label='Observed (n = {0})'.format(numObserved))
-    plt.ylabel('Density')
-    plt.xlabel('Maxima')
-    plt.legend(loc='upper right',fontsize = 12)
-    return plt.gca()
+ 
