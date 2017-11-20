@@ -104,11 +104,13 @@ class FFBS(object):
         # to work.
         self.F    = F    # Dynamic regression vectors 
         self.G    = G    # Static evolution matrix
-        if not self.unknown_obs_var: 
-            self.V    = V    # Static observation variance with dimension [r,r]
-        else:
+        if self.unknown_obs_var: 
+            assert V is None
             self.prior_s = prior_s
-        
+                  
+        else:
+            self.V    = V    # Static observation variance with dimension [r,r]
+            
         self.Y    = Y    # Observations with dimension [T,r]
         self.m0   = m0   # Prior mean on state vector with dimension [n,1]
         self.C0   = C0   # Prior covariance on state vector with dimensions [n,n]
@@ -144,14 +146,7 @@ class FFBS(object):
         else:
             raise ValueError('Evolution discount factors incorrectly specified.')
 
-       
-       
-       
-
-
-        
-
-
+            
     def forward_filter(self):
 
         # These are just for convenience to reduce the number of times that 
@@ -159,6 +154,10 @@ class FFBS(object):
         # the same because they are frequently manipulated / changed.
         G = self.G # Dimensions of [n,n]
         F = self.F # Dimensions of [T,n,r]
+        T = self.T
+        r = self.r
+        n = self.n
+        
         if not self.unknown_obs_var: 
             V = self.V # Dimensions of [r,r]
         else:
@@ -167,9 +166,7 @@ class FFBS(object):
         Y = self.Y # Dimensions of [T,r]
         
 
-        T = self.T
-        r = self.r
-        n = self.n
+        
 
 
         self.e = np.zeros([T,r])   # Forecast error
@@ -193,6 +190,7 @@ class FFBS(object):
             prior_mean       = self.m0 if t == 0 else self.m[t-1]
            
             self.a[t]   = G.dot(prior_mean)
+            
             if self.evolution_discount:
                 self.R[t]   = G.dot(prior_covariance).dot(G.T).dot(self.discount_matrix)
             else:
@@ -201,6 +199,8 @@ class FFBS(object):
             # The one-step forecast 'f' involves the product of our regression 
             # matrix F and the state vector.
             self.f[t]   = F[t].T.dot(self.a[t])
+            self.e[t]   = self.Y[t] - self.f[t]
+            
 
             # Next, we calculate the forecast covariance and forecast error.
             if self.unknown_obs_var:
@@ -219,8 +219,7 @@ class FFBS(object):
             
             # The ratio of R / Q gives us an estimate of the split between
             # prior covariance and forecast covariance.
-            
-            if self.unknown_obs_var:
+            if self.unknown_obs_var and t > 0 :
                 prefactor = self.s[t]/self.s[t-1]
             else:
                 prefactor = 1.0
@@ -238,12 +237,12 @@ class FFBS(object):
 
         if self.nancheck:
             try:
-                assert np.any(np.isnan(self.A)) == False
-                assert np.any(np.isnan(self.m)) == False
-                assert np.any(np.isnan(self.C)) == False
-                assert np.any(np.isnan(self.Q)) == False
-            except:
+                for array in [self.A,self.C,self.Q,self.m]:
+                    assert np.any(np.isnan(array)) == False
+                          
+            except AssertionError:
                 print 'NaN values encountered in forward filtering.'
+                
         self.is_filtered = True
         self.mae = np.mean(np.abs(self.e))
         self.r2 = r2_score(self.Y,self.f)
@@ -334,7 +333,7 @@ class FFBS(object):
         low = min([np.min(self.f),np.min(self.Y)]) * 0.9
         high = max([np.max(self.f),np.max(self.Y)])* 1.1
         plt.figure(figsize = (6,6))
-        plt.scatter(self.f,self.Y,color='k')
+        plt.scatter(self.Y,self.f,color='k')
         plt.ylabel('Predicted',fontsize = 14)
         plt.xlabel('Observed',fontsize = 14)
         plt.xlim([low,high])
