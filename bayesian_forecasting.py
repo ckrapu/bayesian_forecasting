@@ -68,7 +68,7 @@ class FFBS_sample(object):
 
 
 class FFBS(object):
-    def __init__(self,F,G,V,Y,m0,C0,nancheck = True,check_cov_pd=False,evolution_discount=True,deltas = [0.95],W=None):
+    def __init__(self,F,G,V,Y,m0,C0,nancheck = True,check_cov_pd=False,evolution_discount=True,deltas = [0.95],W=None,unknown_obs_var = False,prior_s = 1.0):
         
         # The convention we are using is that F  must be specified as a sequence
         # of [n,r] arrays respectively.
@@ -84,6 +84,8 @@ class FFBS(object):
         
         self.check_cov_pd         = check_cov_pd
         self.evolution_discount   = evolution_discount
+        self.unknown_obs_var      = unknown_obs_var
+        
         self.is_filtered          = False
         self.is_backward_smoothed = False
         self.nancheck             = nancheck # Determines whether we check to see if NaNs have appeared
@@ -102,8 +104,11 @@ class FFBS(object):
         # to work.
         self.F    = F    # Dynamic regression vectors 
         self.G    = G    # Static evolution matrix
+        if not self.unknown_obs_var: 
+            self.V    = V    # Static observation variance with dimension [r,r]
+        else:
+            self.prior_s = prior_s
         
-        self.V    = V    # Static observation variance with dimension [r,r]
         self.Y    = Y    # Observations with dimension [T,r]
         self.m0   = m0   # Prior mean on state vector with dimension [n,1]
         self.C0   = C0   # Prior covariance on state vector with dimensions [n,n]
@@ -154,7 +159,11 @@ class FFBS(object):
         # the same because they are frequently manipulated / changed.
         G = self.G # Dimensions of [n,n]
         F = self.F # Dimensions of [T,n,r]
-        V = self.V # Dimensions of [r,r]
+        if not self.unknown_obs_var: 
+            V = self.V # Dimensions of [r,r]
+        else:
+            self.gamma_n = np.zeros(T)
+            self.s       = np.zeros(T)
         Y = self.Y # Dimensions of [T,r]
         
 
@@ -182,6 +191,7 @@ class FFBS(object):
             # If starting out, we use our initial prior mean and prior covariance.
             prior_covariance = self.C0 if t == 0 else self.C[t-1]
             prior_mean       = self.m0 if t == 0 else self.m[t-1]
+           
             self.a[t]   = G.dot(prior_mean)
             if self.evolution_discount:
                 self.R[t]   = G.dot(prior_covariance).dot(G.T).dot(self.discount_matrix)
@@ -193,17 +203,33 @@ class FFBS(object):
             self.f[t]   = F[t].T.dot(self.a[t])
 
             # Next, we calculate the forecast covariance and forecast error.
-            self.Q[t]   = F[t].T.dot(self.R[t]).dot(F[t]) + V # [r,n] x [n,n] x [n,r]
-            self.e[t]   = Y[t]-self.f[t]              
+            if self.unknown_obs_var:
+                if t == 0:
+                    self.Q[t]   = F[t].T.dot(self.R[t]).dot(F[t]) + self.prior_s
+                else:
+                    self.Q[t]   = F[t].T.dot(self.R[t]).dot(F[t]) + self.s[t-1]
+            else:
+                self.Q[t]   = F[t].T.dot(self.R[t]).dot(F[t]) + V # [r,n] x [n,n] x [n,r]
+            
+            if self.unknown_obs_var:
+                # We also want to update our distribution over the variance
+                self.gamma_n[t]    = 1.0 if t==0 else self.gamma_n[t-1]+1
+                self.s[t]          = self.prior_s if t==0 else self.s[t-1] + self.s[t-1] / self.gamma_n[t] * (self.e[t]**2/self.Q[t] - 1)
+                
             
             # The ratio of R / Q gives us an estimate of the split between
             # prior covariance and forecast covariance.
+            
+            if self.unknown_obs_var:
+                prefactor = self.s[t]/self.s[t-1]
+            else:
+                prefactor = 1.0
             if r == 1:
                 self.A[t] = np.squeeze(self.R[t].dot(F[t])/np.squeeze(self.Q[t]))[:,np.newaxis]
-                self.C[t] = self.R[t] - self.A[t].dot(self.A[t].T)*np.squeeze(self.Q[t])
+                self.C[t] = prefactor * (self.R[t] - self.A[t].dot(self.A[t].T)*np.squeeze(self.Q[t]))
             else:
                 self.A[t] = self.R[t].dot(F[t]).dot(np.linalg.inv(self.Q[t]))
-                self.C[t] = self.R[t] - self.A[t].dot(self.Q[t]).dot(self.A[t].T)
+                self.C[t] = prefactor * (self.R[t] - self.A[t].dot(self.Q[t]).dot(self.A[t].T))
             
             # The posterior mean over the state vector is a weighted average 
             # of the prior and the error, weighted by the adaptive coefficient.            
@@ -224,6 +250,7 @@ class FFBS(object):
         
     def backward_smooth(self):
         
+        # TODO: add in retrospective analysis for unknown variance
         G = self.G
 
         # None of the necessary estimates required for the BS step will be ready

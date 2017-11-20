@@ -19,7 +19,7 @@ class TestCases(unittest.TestCase):
         length = 1000
         
         y,F = simulate_and_data_matrix_arp(coefficients,sigma,length,initial)
-        print F.shape
+
         G = np.identity(order)
         W = np.identity(order) * sigma
         V = 0.1
