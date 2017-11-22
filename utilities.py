@@ -20,6 +20,20 @@ import sys
 from pymc3.distributions.dist_math import bound
 
 
+def trace_nonzero(trace,ci=95.0,axis=0):
+    assert len(trace.shape) == 2
+    medians = np.median(trace,axis = axis)
+    upper = np.percentile(trace,100.0-(100.0-ci)/2.0,axis=axis)
+    lower = np.percentile(trace,(100.0-ci)/2.0,axis=axis)
+    zero_is_between = np.logical_and(upper > 0,lower < 0)
+    return ~zero_is_between
+
+def the_only_function_you_need(filepath ='./project/states.shp' ):
+    usa     = gpd.read_file(filepath)
+    usa     = usa.set_index('STATE_NAME')
+    usa     = usa.drop(['Hawaii','Alaska'],axis=0)
+    ax      = usa.plot(color='w',figsize = (20,7),edgecolor='k')
+    return ax
 
 def gaussianKernel(dist,c):
     return np.exp(-(dist)**2/(2*c**2))
@@ -326,7 +340,7 @@ def parse_mopex(filename):
     data['day'] = data['date'].apply(lambda x: x[6:8])
     data = data.set_index(pd.to_datetime(data[['year','month','day']]))
     data = data.replace(to_replace=-99.0000,value=np.nan)
-    return data.drop('date',axis = 1)
+    return data.drop(['date','year','month','day'],axis = 1)
 
 def retrieveGridmetSeries(latitude,longitude,bufferInMeters = 5000,
                           seriesToDownload = ['pr','pet','tmmn','tmmx'],

@@ -68,7 +68,7 @@ class FFBS_sample(object):
 
 
 class FFBS(object):
-    def __init__(self,F,G,V,Y,m0,C0,nancheck = True,check_cov_pd=False,evolution_discount=True,deltas = [0.95],W=None,unknown_obs_var = False,prior_s = 1.0):
+    def __init__(self,F,G,V,Y,m0,C0,nancheck = True,check_cov_pd=False,evolution_discount=True,deltas = [0.95],W=None,unknown_obs_var = False,prior_s = 1.0,suppress_warn = False,dynamic_G = False):
         
         # The convention we are using is that F  must be specified as a sequence
         # of [n,r] arrays respectively.
@@ -77,14 +77,27 @@ class FFBS(object):
         # down the road.
         assert len(F.shape) == 3
         
-        # We'll also assume that G is fixed over time.
-        assert len(G.shape) == 2
+        if dynamic_G:
+            # It is useful to be able to specify a G matrix that changes.
+            # This is especially helpful for seasonal effects with a long
+            # period.
+            assert len(G.shape) == 3
+            assert Y.shape[0]   == G.shape[0] # Check to see if number of observations matches number of G
+            assert G.shape[1]   == G.shape[2] # Check to see if square
+            assert G.shape[1]   == F.shape[1] # Make sure column index is shared between F,G
+        
+        else:
+            # This is the case where we want a single G matrix for all time.
+            assert len(G.shape) == 2
+            
         
        
         
         self.check_cov_pd         = check_cov_pd
         self.evolution_discount   = evolution_discount
         self.unknown_obs_var      = unknown_obs_var
+        self.suppress_warn        = suppress_warn
+        self.dynamic_G            = dynamic_G
         
         self.is_filtered          = False
         self.is_backward_smoothed = False
@@ -100,10 +113,10 @@ class FFBS(object):
         self.r = r            # Observation dimension
         self.n = m0.shape[0]  # State dimension
 
-        # All of these need to be defined for the standard DLM (no discounting, known observational variance)
-        # to work.
-        self.F    = F    # Dynamic regression vectors 
-        self.G    = G    # Static evolution matrix
+        # F and G always need to be specified.
+        self.F    = F    # Dynamic regression vectors
+        self.G    = G    # Evolution matrix
+        
         if self.unknown_obs_var: 
             assert V is None
             self.prior_s = prior_s
@@ -121,14 +134,15 @@ class FFBS(object):
                 raise ValueError('Neither a discount factor nor evolution variance matrix has been specified.')
             else:
                 self.W    = W    # Static state evolution variance matrix
+                
         else:
-        
             # For retrospective analysis, G needs to be nonsingular with a 
             # discount approach.
             try:
                 np.linalg.cholesky(G) # Fails if G is singular.
             except np.linalg.LinAlgError:
-                print 'A discount factor was specified but G is singular. Retrospective analysis will not be reliable.'
+                if not suppress_warn:
+                    print 'A discount factor was specified but G is singular. Retrospective analysis will not be reliable.'
                 
      
         # The discount factors should be passed in as a list of delta values
@@ -152,8 +166,9 @@ class FFBS(object):
         # These are just for convenience to reduce the number of times that 
         # these static arrays are referenced. The other arrays aren't treated
         # the same because they are frequently manipulated / changed.
-        G = self.G # Dimensions of [n,n]
+        
         F = self.F # Dimensions of [T,n,r]
+        Y = self.Y # Dimensions of [T,r]
         T = self.T
         r = self.r
         n = self.n
@@ -163,12 +178,7 @@ class FFBS(object):
         else:
             self.gamma_n = np.zeros(T)
             self.s       = np.zeros(T)
-        Y = self.Y # Dimensions of [T,r]
         
-
-        
-
-
         self.e = np.zeros([T,r])   # Forecast error
         self.Q = np.zeros([T,r,r]) # Forecast covariance
         self.f = np.zeros([T,r])   # Forecast mean
@@ -178,12 +188,18 @@ class FFBS(object):
         self.R = np.zeros([T,n,n]) # State vector prior variance
         self.C = np.zeros([T,n,n]) # State vector posterior variance
         self.B = np.zeros([T,n,n]) # Retrospective ???
-        # Recall that F should have dimensions [T,n,r] so that the product F[t,:,:]'x is an r-vector
-
+      
         # Forward filtering
         # For each time step, we ingest a new observation and update our priors
         # to posteriors.
+        
+        # If G varies over time, pick out the one we want.
         for t in range(T):
+            self.t = t
+            if self.dynamic_G:
+                G = self.G[t]
+            else:
+                G = self.G # Dimensions of [n,n]
 
             # If starting out, we use our initial prior mean and prior covariance.
             prior_covariance = self.C0 if t == 0 else self.C[t-1]
@@ -205,30 +221,30 @@ class FFBS(object):
             # Next, we calculate the forecast covariance and forecast error.
             if self.unknown_obs_var:
                 if t == 0:
-                    self.Q[t]   = F[t].T.dot(self.R[t]).dot(F[t]) + self.prior_s
+                    self.Q[t]       = F[t].T.dot(self.R[t]).dot(F[t]) + self.prior_s
+                    self.gamma_n[t] = 1.0
+                    self.s[t]       = self.prior_s 
+                    
                 else:
-                    self.Q[t]   = F[t].T.dot(self.R[t]).dot(F[t]) + self.s[t-1]
+                    self.Q[t]       = F[t].T.dot(self.R[t]).dot(F[t]) + self.s[t-1]
+                    self.gamma_n[t] = self.gamma_n[t-1]+1
+                    self.s[t]       = self.s[t-1] + self.s[t-1] / self.gamma_n[t] * (self.e[t]**2/self.Q[t] - 1)
             else:
                 self.Q[t]   = F[t].T.dot(self.R[t]).dot(F[t]) + V # [r,n] x [n,n] x [n,r]
-            
-            if self.unknown_obs_var:
-                # We also want to update our distribution over the variance
-                self.gamma_n[t]    = 1.0 if t==0 else self.gamma_n[t-1]+1
-                self.s[t]          = self.prior_s if t==0 else self.s[t-1] + self.s[t-1] / self.gamma_n[t] * (self.e[t]**2/self.Q[t] - 1)
-                
+                  
             
             # The ratio of R / Q gives us an estimate of the split between
             # prior covariance and forecast covariance.
             if self.unknown_obs_var and t > 0 :
-                prefactor = self.s[t]/self.s[t-1]
+                self.prefactor = self.s[t]/self.s[t-1]
             else:
-                prefactor = 1.0
+                self.prefactor = 1.0
             if r == 1:
-                self.A[t] = np.squeeze(self.R[t].dot(F[t])/np.squeeze(self.Q[t]))[:,np.newaxis]
-                self.C[t] = prefactor * (self.R[t] - self.A[t].dot(self.A[t].T)*np.squeeze(self.Q[t]))
+                self.A[t] = self.R[t].dot(F[t])/np.squeeze(self.Q[t])
+                self.C[t] = self.prefactor * (self.R[t] - self.A[t].dot(self.A[t].T)*np.squeeze(self.Q[t]))
             else:
                 self.A[t] = self.R[t].dot(F[t]).dot(np.linalg.inv(self.Q[t]))
-                self.C[t] = prefactor * (self.R[t] - self.A[t].dot(self.Q[t]).dot(self.A[t].T))
+                self.C[t] = self.prefactor * (self.R[t] - self.A[t].dot(self.Q[t]).dot(self.A[t].T))
             
             # The posterior mean over the state vector is a weighted average 
             # of the prior and the error, weighted by the adaptive coefficient.            
@@ -250,7 +266,7 @@ class FFBS(object):
     def backward_smooth(self):
         
         # TODO: add in retrospective analysis for unknown variance
-        G = self.G
+        
 
         # None of the necessary estimates required for the BS step will be ready
         # if we haven't already applied the forward filtering.
@@ -263,36 +279,34 @@ class FFBS(object):
         # Backward smoothing
         self.a_r =  np.zeros([self.T,self.n])         # Retrospective mean over state distribution
         self.R_r =  np.zeros([self.T,self.n,self.n])  # Retrospective posterior covariance over state
-
-        # We start out by assuming that the mean/covariance for the final timestep is
-        # given by the estimate of mean/covariance we obtained at the end of the 
-        # forward pass
+  
+  
+        for t in range(self.T-1,-1,-1):
+                # Unlike in the case of an unknown evolution matrix with discounting,
+                # we don't need the inverse of G or G transpose.
+                if self.dynamic_G:
+                    G       = self.G[t+1]
+                                      
+                else:
+                    G       = self.G 
+                    
+                if t == ( self.T-1):
+                    self.a_r[t] = self.m[t] 
+                    self.R_r[t] = self.C[t]
+                    
+                else:
+                    self.B[t]   = self.C[t].dot(G.T).dot(np.linalg.inv(self.R[t+1]))
+                    
+                    self.a_r[t] = self.m[t] -  self.B[t].dot(self.a[t+1] -  self.a_r[t+1])
+                    self.R_r[t] = self.C[t] -  self.B[t].dot(self.R[t+1] -  self.R_r[t+1]).dot(self.B[t].T)
         
-        # If we use discounting for the state evolution, then we follow 
-        # retrospective analysis per the equations in 4.3.6 of Prado & West.
-        if self.evolution_discount:
-            G_inv = np.linalg.inv(G)
-            G_T_inv = np.linalg.inv(G.T)
-            
-            for t in range( self.T-1,-1,-1):
-                self.a_r[t] =  self.m[t] if t==( self.T-1) else  (1.0 - self.discount_matrix).dot(self.m[t]) + self.discount_matrix.dot(G_inv).dot(self.a_r[t+1])
-                self.R_r[t] =  self.C[t] if t==( self.T-1) else  (1.0 - self.discount_matrix).dot(self.C[t])+ np.linalg.multi_dot([self.discount_matrix,self.discount_matrix,G_inv,self.R[t+1],G_T_inv])
-        
-            
-        # Default retrospective smoothing for case of known state innovation matrix.
-        else:
-            for t in range(self.T-1,-1,-1):
-                self.B[t]   =  self.C[t].dot(G.T).dot(np.linalg.inv(self.R[self.T-1])) if t == ( self.T-1) else  self.C[t].dot(G.T).dot(np.linalg.inv(self.R[t+1])) 
-                self.a_r[t] =  self.m[t]  if t==( self.T-1) else  self.m[t] -  self.B[t].dot(self.a[t+1]-  self.a_r[t+1])
-                self.R_r[t] =  self.C[t] if t==( self.T-1) else  self.C[t] -  self.B[t].dot(self.R[t+1] -  self.R_r[t+1]).dot( self.B[t].T)
-
         if self.nancheck:
-            try:
-                assert np.any(np.isnan(self.a_r)) == False
-                assert np.any(np.isnan(self.R_r)) == False
-                assert np.any(np.isnan(self.B))   == False
-            except:
-                print 'NaN values encountered in backward smoothing.'
+            for array in [self.a_r,self.R_r,self.B]:
+                try:
+                    assert np.any(np.isnan(array)) == False
+
+                except:
+                    print 'NaN values encountered in backward smoothing.'
 
     def backward_sample(self):
         
@@ -324,7 +338,7 @@ class FFBS(object):
         return self.simulated_state
     
     
-    def pred_vs_obs_plot(self):
+    def pred_vs_obs_plot(self,figsize =(6,6) ):
         """ Wrapper for scatter plot showing the predicted
         versus observed values"""
         
@@ -332,7 +346,7 @@ class FFBS(object):
         
         low = min([np.min(self.f),np.min(self.Y)]) * 0.9
         high = max([np.max(self.f),np.max(self.Y)])* 1.1
-        plt.figure(figsize = (6,6))
+        plt.figure(figsize = figsize )
         plt.scatter(self.Y,self.f,color='k')
         plt.ylabel('Predicted',fontsize = 14)
         plt.xlabel('Observed',fontsize = 14)
@@ -343,30 +357,30 @@ class FFBS(object):
         
         return plt.gca()
     
-    def time_plot(self):
+    def time_plot(self,deviation_multiplier = 1.645,figsize = (10,6),start_index=1,stop_index = -1):
         """Wrapper for a plot showing the forecasted values with 90% 
         confidence interval and the observed values. The first timestep
         is ignored in order to avoid distortion from misspecified 
         variance."""
         
-        deviations = np.squeeze(np.sqrt(self.Q) * 1.645)
-        upper = np.squeeze(self.f)+deviations
-        lower = np.squeeze(self.f)-deviations
+        deviations = np.squeeze(np.sqrt(self.Q[start_index:stop_index]) * deviation_multiplier)
+        upper = np.squeeze(self.f[start_index:stop_index])+deviations
+        lower = np.squeeze(self.f[start_index:stop_index])-deviations
         
-        plt.figure(figsize = (10,6))
-        plt.plot(self.f,linestyle='-',color='k',label='1-step forecast')
-        plt.plot(self.Y,color='r',linestyle='',marker='o',label='Observed')
+        plt.figure(figsize = figsize)
+        plt.plot(self.f[start_index:stop_index],linestyle='-',color='k',label='1-step forecast')
+        plt.plot(self.Y[start_index:stop_index],color='r',linestyle='',marker='o',label='Observed')
         plt.gca().fill_between(np.arange(len(deviations)),upper,lower,color='0.8',label='90% CI')
-        plt.xlim([1,len(deviations)])
+        
         plt.legend(loc='upper right')
         return plt.gca()
 
-    def residual_plot(self):
+    def residual_plot(self,figsize = (6,6)):
         """Wrapper for plot comparing the residuals / forecast errors
         against the observations. A horizontal line is added at residual = 0
         in order to aid visual identification of heteroscedasticity."""
         
-        plt.figure(figsize = (6,6))
+        plt.figure(figsize = figsize)
         low  = np.min(self.Y) * 0.9
         high = np.max(self.Y)* 1.1
 
