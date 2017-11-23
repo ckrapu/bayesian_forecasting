@@ -64,12 +64,58 @@ class TestCases(unittest.TestCase):
         ffbs.forward_filter()
         ffbs.backward_smooth()
         self.assertTrue(np.mean(np.abs(ffbs.e[-120::])) < 4.0)
+    
+    def test_cyclic_sample(self):
+        """ This test case constructs a noisy sine wave, applies 
+        forward filtering/backward smoothing and draws a sample
+        trajectory. The observational variance is assumed to be known."""
+        T = 200
+        signal = np.sin(2*np.pi*np.arange(T) / 20)
+        Y = signal + np.random.randn(T) * 0.5
+        F = signal[:,np.newaxis,np.newaxis]
+        G = np.identity(1)
+
+        m0 = np.ones(1)* 0.5
+        C0 = np.identity(1) * 0.5
+        V = 1.0
+        ffbs = bf.FFBS(F,G,V,Y,m0,C0)
+        ffbs.forward_filter()
+        ffbs.backward_smooth()
+        theta  = ffbs.backward_sample()
+        median = np.median(theta)
+        error = np.abs(1.0 - median)
+        self.assertTrue(error < 0.5)
+        
+    def test_cyclic_sample_unknown_obs_Var(self):
+        """ This test case constructs a noisy sine wave, applies 
+        forward filtering/backward smoothing and draws a sample
+        trajectory. The observational variance is not known."""
+        T = 200
+        signal = np.sin(2*np.pi*np.arange(T) / 20)
+        Y = signal + np.random.randn(T)
+        F = signal[:,np.newaxis,np.newaxis]
+        G = np.identity(1)
+
+        m0 = np.ones(1)* 0.5
+        C0 = np.identity(1) * 0.5
+        V = None
+        ffbs = bf.FFBS(F,G,V,Y,m0,C0,unknown_obs_var = True)
+        ffbs.forward_filter()
+        ffbs.backward_smooth()
+        theta  = ffbs.backward_sample()
+        mean   = np.mean(theta)
+        median = np.median(theta)
+        median_error = np.abs(1.0- median)
+        mean_error   = np.abs(1.0 - mean)
+        self.assertTrue(median_error < 0.2 and mean_error < 0.2)
+        
+        
         
         
     def test_cyclic_discount(self):
         """ This test case is identical to 'test_cyclic' save for 
         specification of an innovation discount factor instead of a 
-        matrix W.Rhe mean absolute deviation (i.e. the forecast error in degrees C)
+        matrix W. The mean absolute deviation (i.e. the forecast error in degrees C)
         should be less than 4.0 for the last 10 years of the record."""
         
         sample_data = parse_mopex('./sample_data/brookings.csv')
@@ -92,6 +138,7 @@ class TestCases(unittest.TestCase):
         mae_error = np.mean(np.abs(ffbs.e))
         self.assertTrue(mae_error < 3.0 and mae_error > 2.0)
         
+   
 
     def test_poly(self):
         """ This test case considers a simple polynomial growth model in which

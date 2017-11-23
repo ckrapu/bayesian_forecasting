@@ -1,6 +1,8 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.metrics import r2_score
+from scipy.stats import norm
+from scipy.stats import t as student_t
 
 class FFBS_sample(object):
     """An FFBS_sample object is used as a sampling step in a PyMC3 model 
@@ -68,7 +70,8 @@ class FFBS_sample(object):
 
 
 class FFBS(object):
-    def __init__(self,F,G,V,Y,m0,C0,nancheck = True,check_cov_pd=False,evolution_discount=True,deltas = [0.95],W=None,unknown_obs_var = False,prior_s = 1.0,suppress_warn = False,dynamic_G = False):
+    def __init__(self,F,G,V,Y,m0,C0,nancheck = True,check_cov_pd=False,evolution_discount=True,deltas = [0.95],W=None,unknown_obs_var = False,prior_s = 1.0,suppress_warn = False,dynamic_G = False,
+                delta_v = 0.98):
         
         # The convention we are using is that F  must be specified as a sequence
         # of [n,r] arrays respectively.
@@ -98,6 +101,8 @@ class FFBS(object):
         self.unknown_obs_var      = unknown_obs_var
         self.suppress_warn        = suppress_warn
         self.dynamic_G            = dynamic_G
+        self.delta_v              = delta_v
+        self.prior_s              = prior_s
         
         self.is_filtered          = False
         self.is_backward_smoothed = False
@@ -178,6 +183,7 @@ class FFBS(object):
         else:
             self.gamma_n = np.zeros(T)
             self.s       = np.zeros(T)
+            self.s[0]    = self.prior_s
         
         self.e = np.zeros([T,r])   # Forecast error
         self.Q = np.zeros([T,r,r]) # Forecast covariance
@@ -188,6 +194,10 @@ class FFBS(object):
         self.R = np.zeros([T,n,n]) # State vector prior variance
         self.C = np.zeros([T,n,n]) # State vector posterior variance
         self.B = np.zeros([T,n,n]) # Retrospective ???
+        self.r = np.zeros(T)       # For unknown obs. variance
+
+        
+        self.log_likelihood = np.zeros(T)
       
         # Forward filtering
         # For each time step, we ingest a new observation and update our priors
@@ -220,15 +230,21 @@ class FFBS(object):
 
             # Next, we calculate the forecast covariance and forecast error.
             if self.unknown_obs_var:
+                
                 if t == 0:
                     self.Q[t]       = F[t].T.dot(self.R[t]).dot(F[t]) + self.prior_s
                     self.gamma_n[t] = 1.0
-                    self.s[t]       = self.prior_s 
+                    self.r[t]       = (self.gamma_n[t] + self.e[t]**2 / self.Q[t]) / (self.gamma_n[t] + 1)
                     
+                  
                 else:
                     self.Q[t]       = F[t].T.dot(self.R[t]).dot(F[t]) + self.s[t-1]
-                    self.gamma_n[t] = self.gamma_n[t-1]+1
-                    self.s[t]       = self.s[t-1] + self.s[t-1] / self.gamma_n[t] * (self.e[t]**2/self.Q[t] - 1)
+                    self.gamma_n[t] = self.delta_v * self.gamma_n[t-1]+1
+                    self.r[t]       = (self.gamma_n[t] + self.e[t]**2 / self.Q[t]) / (self.gamma_n[t] + 1)
+                    self.s[t]       = self.r[t] * self.s[t-1]
+                    
+                
+                
             else:
                 self.Q[t]   = F[t].T.dot(self.R[t]).dot(F[t]) + V # [r,n] x [n,n] x [n,r]
                   
@@ -249,6 +265,15 @@ class FFBS(object):
             # The posterior mean over the state vector is a weighted average 
             # of the prior and the error, weighted by the adaptive coefficient.            
             self.m[t,:]   = self.a[t]+self.A[t].dot(self.e[t])
+            
+            
+            # The last thing we do in each loop iteration is tabulate the current
+            # step's contribution to the overall log-likelihood.
+            if self.unknown_obs_var:
+                self.log_likelihood[t] = student_t.logpdf(self.e[t], self.gamma_n[t-1], scale=np.sqrt(self.Q[t]))
+            else:
+                self.log_likelihood[t] = norm.logpdf(self.e[t], scale=np.sqrt(self.Q[t]))
+               
 
 
         if self.nancheck:
@@ -262,6 +287,11 @@ class FFBS(object):
         self.is_filtered = True
         self.mae = np.mean(np.abs(self.e))
         self.r2 = r2_score(self.Y,self.f)
+        self.ll_sum = self.log_likelihood.sum()
+        
+                                                 
+                                                     
+                                                    
         
     def backward_smooth(self):
         
@@ -277,31 +307,42 @@ class FFBS(object):
 
 
         # Backward smoothing
-        self.a_r =  np.zeros([self.T,self.n])         # Retrospective mean over state distribution
-        self.R_r =  np.zeros([self.T,self.n,self.n])  # Retrospective posterior covariance over state
-  
-  
+        self.m_r =  np.zeros([self.T,self.n])         # Retrospective mean over state distribution
+        self.C_r =  np.zeros([self.T,self.n,self.n])  # Retrospective posterior covariance over state
+        self.s_r =  np.zeros(self.T)                  # Retrospective smoothed estimate of variance
+        self.n_r =  np.zeros(self.T)                  # Retrospective smoothed degrees of freedom
+        
         for t in range(self.T-1,-1,-1):
                 # Unlike in the case of an unknown evolution matrix with discounting,
                 # we don't need the inverse of G or G transpose.
                 if self.dynamic_G:
-                    G       = self.G[t+1]
+                    G = self.G[t+1]
                                       
                 else:
-                    G       = self.G 
+                    G = self.G 
                     
                 if t == ( self.T-1):
-                    self.a_r[t] = self.m[t] 
-                    self.R_r[t] = self.C[t]
+                    self.m_r[t] = self.m[t] 
+                    self.C_r[t] = self.C[t]
+                    if self.unknown_obs_var:
+                        # Set smoothed estimate of variance to be 
+                        # the last forward-filtered estimate of variance
+                        self.s_r[t] = self.s[t]
+                        self.n_r[t] = self.gamma_n[t]
                     
                 else:
                     self.B[t]   = self.C[t].dot(G.T).dot(np.linalg.inv(self.R[t+1]))
                     
-                    self.a_r[t] = self.m[t] -  self.B[t].dot(self.a[t+1] -  self.a_r[t+1])
-                    self.R_r[t] = self.C[t] -  self.B[t].dot(self.R[t+1] -  self.R_r[t+1]).dot(self.B[t].T)
-        
+                    self.m_r[t] = self.m[t] + self.B[t].dot(self.m_r[t+1] -  self.a[t+1])
+                    self.C_r[t] = self.C[t] + self.B[t].dot(self.C_r[t+1] -  self.R[t+1]).dot(self.B[t].T)
+                    if self.unknown_obs_var:
+                        self.s_r[t] = ((1.0 - self.delta_v) / self.s[t] + self.delta_v / self.s_r[t+1])**-1
+                        self.n_r[t] = (1-self.delta_v) * self.gamma_n[t] + self.delta_v * self.gamma_n[t+1]
+                        self.C_r[t] = self.C_r[t] * self.s_r[t]/self.s[t]
+                                     
+                                     
         if self.nancheck:
-            for array in [self.a_r,self.R_r,self.B]:
+            for array in [self.m_r,self.C_r,self.B]:
                 try:
                     assert np.any(np.isnan(array)) == False
 
@@ -311,31 +352,62 @@ class FFBS(object):
     def backward_sample(self):
         
         T = self.T
-        # Simulated historical value of state
-        self.simulated_state = np.zeros([T,self.n])
-
-        # Simulate the end time point from the posterior for T
-        # Accessing with the index T-1 gets the last time step
-        
-        self.simulated_state[T-1] = np.random.multivariate_normal(self.a_r[T-1],self.R_r[T-1])
-
-        # Counts down from the second-to-last until the very first timestep
-        for t in range(T-2,-1,-1):
+        self.theta = np.zeros([T,self.n])
+        self.sample_C = np.zeros([T,self.n,self.n])
+        self.sample_m = np.zeros([T,self.n])
+    
+        # Depending on whether the observational variance is known or 
+        # not, we proceed using one of two different recursive sampling algorithms.
+        if self.unknown_obs_var:
             
-            simulation_mean = self.m[t] - self.B[t].dot(self.simulated_state[t+1]-self.a[t+1])
-            simulation_cov  = self.C[t] - self.B[t].dot(self.R[t+1]).dot(self.B[t].T)
+            # First, we draw a sample standard deviation (root variance) from
+            # the gamma posteror over the precision and take its square root.
+            self.rv = np.sqrt(1.0 / np.random.gamma(self.gamma_n[-1]/2.0,scale = 2.0 / (self.gamma_n[-1]*self.s[-1])))
             
-            if self.check_cov_pd:
-                try:
-                    np.linalg.cholesky(simulation_cov)
-                except np.linalg.linalg.LinAlgError:
-                    print 'Simulation covariance matrix is not positive definite. Printing simulation covariance,'
-                    print simulation_cov
-                    print self.B[t]
-                    print self.R[t+1]
-            self.simulated_state[t] = np.random.multivariate_normal(simulation_mean,simulation_cov)
-
-        return self.simulated_state
+            # Second, we draw a bunch of vectors from the standard normal that we
+            # will later rescale and add to the sample mean to get sampled values
+            # of theta.
+            random_normal = np.random.randn(self.n,self.T)
+            
+            # At the beginning (aka the last time step) we assume that the prior
+            # over the sample theta is given by our posterior over the state vector
+            # at the last time step.
+            self.sample_m[-1] = self.m[-1]
+            self.theta[-1] = self.sample_m[-1] + self.rv * (np.linalg.cholesky(self.C[-1]/self.s[-1])).dot(random_normal[:,-1])
+            self.sample_C[-1] = self.C[-1]
+            
+            # We iteratively draw a sample of theta, condition on that sample and draw
+            # a new value of theta for the preceding timestep.
+            for t in range(T-2,-1,-1):
+                self.t = t
+                self.sample_B = self.C[t].dot(self.G.T).dot(np.linalg.inv(self.R[t+1]))
+                self.sample_C[t] = self.C[t] - self.sample_B.dot(self.sample_C[t] - self.R[t+1]).dot(self.sample_B.T)
+                self.sample_m[t] = self.m[t] + self.sample_B.dot(self.theta[t+1] - self.a[t+1])
+                
+                # The Cholesky decomposition of C is akin to taking the square root of a variance
+                # to get a standard deviation. This is just a multivariate way of rescaling a 
+                # standard normal by a standard deviation to get a draw from a nonstandard normal
+                # distribution. 
+                self.theta[t] = self.sample_m[t]
+                + self.rv*np.linalg.cholesky(self.sample_C[t] / self.s[t]).dot(random_normal[:,t])
+                
+        else:
+            # The backward sampling is much simpler if the observational variance is known.
+            # see page 130 in Prado & West for the details.
+            self.sample_m[-1] = self.m[-1]
+            self.sample_C[-1] = self.C[-1]
+            self.theta[-1] = np.random.multivariate_normal(self.sample_m[-1], self.sample_C[-1])
+            for t in range(T-2,-1,-1):
+                self.t = t
+                self.sample_m[t] = self.m[t+1] + self.B[t].dot(self.theta[t+1] - self.a[t+1])
+                self.sample_C[t] = self.C[t] - self.B[t].dot(self.R[t+1]).dot(self.B[t].T)
+                self.theta[t] = np.random.multivariate_normal(self.sample_m[t],self.sample_C[t])
+                
+            
+        if self.nancheck:
+            assert ~np.any(np.isnan(self.theta))
+                
+        return self.theta
     
     
     def pred_vs_obs_plot(self,figsize =(6,6) ):
