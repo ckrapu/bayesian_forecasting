@@ -11,9 +11,7 @@ class FFBS_sample(object):
 
     def __init__(self,vars,F,G,r,n,observationsVarName='observations',
                  check_cov_pd = False):
-        
-        
-        
+               
         self.F = F
         self.G = G
         self.r = r
@@ -39,7 +37,6 @@ class FFBS_sample(object):
         
         F = self.F
         G = self.G
-      
          
         # PyMC3 may try to handle the scalar variances as log-transformed variables.
         # Here, we specify that the evolution and observation variances are known, 
@@ -92,29 +89,28 @@ class FFBS(object):
         else:
             # This is the case where we want a single G matrix for all time.
             assert len(G.shape) == 2
-            
-        
-       
-        
-        self.check_cov_pd         = check_cov_pd
-        self.evolution_discount   = evolution_discount
-        self.unknown_obs_var      = unknown_obs_var
-        self.suppress_warn        = suppress_warn
-        self.dynamic_G            = dynamic_G
-        self.delta_v              = delta_v
-        self.prior_s              = prior_s
+         
+        self.check_cov_pd         = check_cov_pd        # Do we want to warn if covariance is not positive definite?
+        self.evolution_discount   = evolution_discount  # Discount factor for state evolution variance
+        self.unknown_obs_var      = unknown_obs_var     # Is the observational variance observed?
+        self.suppress_warn        = suppress_warn       # Warning for G not being singular
+        self.dynamic_G            = dynamic_G           # Is G allowed to vary over time?
+        self.delta_v              = delta_v             # Discount factor for observational variance
+        self.prior_s              = prior_s             # Prior point estimate of observational variance
         
         self.is_filtered          = False
         self.is_backward_smoothed = False
         self.nancheck             = nancheck # Determines whether we check to see if NaNs have appeared
-        
-        T = Y.shape[0]
+ 
+        # The dimension of the observed series needs to be determined here.
+        # Most of the code will only work for the univariate case; the 
+        # multivariate version isn't operational yet.
         try:
             r = Y.shape[1]
         except IndexError:
             r = 1
                
-        self.T = T            # Number of timesteps
+        self.T = Y.shape[0]   # Number of timesteps
         self.r = r            # Observation dimension
         self.n = m0.shape[0]  # State dimension
 
@@ -122,6 +118,8 @@ class FFBS(object):
         self.F    = F    # Dynamic regression vectors
         self.G    = G    # Evolution matrix
         
+        # If the matrix V is not specified (and it usually isn't) the the observational
+        # variance is treated as an unknown variable.
         if self.unknown_obs_var: 
             assert V is None
             self.prior_s = prior_s
@@ -134,13 +132,8 @@ class FFBS(object):
         self.C0   = C0   # Prior covariance on state vector with dimensions [n,n]
             
         # We need to make sure that the DLM evolution variance is specified one way or another.
-        if not evolution_discount:
-            if W is None:
-                raise ValueError('Neither a discount factor nor evolution variance matrix has been specified.')
-            else:
-                self.W    = W    # Static state evolution variance matrix
-                
-        else:
+        if evolution_discount:
+            
             # For retrospective analysis, G needs to be nonsingular with a 
             # discount approach.
             try:
@@ -148,8 +141,13 @@ class FFBS(object):
             except np.linalg.LinAlgError:
                 if not suppress_warn:
                     print 'A discount factor was specified but G is singular. Retrospective analysis will not be reliable.'
-                
-     
+        else:
+            # Fire of an error if the evolution variance is not specified one way or another.
+            if W is None:
+                raise ValueError('Neither a discount factor nor evolution variance matrix has been specified.')
+            else:
+                self.W    = W    # Static state evolution variance matrix
+ 
         # The discount factors should be passed in as a list of delta values
         # with one delta for each dimension of the state vector.
         # If there is only one delta passed in, then we'll use it as the 
@@ -178,34 +176,34 @@ class FFBS(object):
         r = self.r
         n = self.n
         
-        if not self.unknown_obs_var: 
-            V = self.V # Dimensions of [r,r]
-        else:
+        if self.unknown_obs_var:
             self.gamma_n = np.zeros(T)
             self.s       = np.zeros(T)
             self.s[0]    = self.prior_s
+           
+        else:
+            V = self.V # Dimensions of [r,r]
+            
+        self.log_likelihood = np.zeros(T) # Per-timestep contribution to LL
         
+        self.r = np.zeros(T)       # For unknown obs. variance
         self.e = np.zeros([T,r])   # Forecast error
-        self.Q = np.zeros([T,r,r]) # Forecast covariance
         self.f = np.zeros([T,r])   # Forecast mean
-        self.m = np.zeros([T,n]) # State vector/matrix posterior mean
-        self.a = np.zeros([T,n]) # State vector/matrix prior mean
+        self.m = np.zeros([T,n])   # State vector/matrix posterior mean
+        self.a = np.zeros([T,n])   # State vector/matrix prior mean
+        self.Q = np.zeros([T,r,r]) # Forecast covariance
         self.A = np.zeros([T,n,r]) # Adaptive coefficient vector
         self.R = np.zeros([T,n,n]) # State vector prior variance
         self.C = np.zeros([T,n,n]) # State vector posterior variance
         self.B = np.zeros([T,n,n]) # Retrospective ???
-        self.r = np.zeros(T)       # For unknown obs. variance
 
-        
-        self.log_likelihood = np.zeros(T)
-      
         # Forward filtering
         # For each time step, we ingest a new observation and update our priors
         # to posteriors.
-        
-        # If G varies over time, pick out the one we want.
         for t in range(T):
             self.t = t
+            
+            # If G varies over time, pick out the one we want.
             if self.dynamic_G:
                 G = self.G[t]
             else:
@@ -214,9 +212,13 @@ class FFBS(object):
             # If starting out, we use our initial prior mean and prior covariance.
             prior_covariance = self.C0 if t == 0 else self.C[t-1]
             prior_mean       = self.m0 if t == 0 else self.m[t-1]
-           
             self.a[t]   = G.dot(prior_mean)
             
+            # If we use a discounting approach for the evolution variance,
+            # we just inflate our covariance matrix by a little bit 
+            # at each time step. Otherwise, we just add the innovation
+            # variance W. We do this because the covariance of the sum of 
+            # two normal RVs is equal to the elementwise sum of the covariances.
             if self.evolution_discount:
                 self.R[t]   = G.dot(prior_covariance).dot(G.T).dot(self.discount_matrix)
             else:
@@ -227,7 +229,6 @@ class FFBS(object):
             self.f[t]   = F[t].T.dot(self.a[t])
             self.e[t]   = self.Y[t] - self.f[t]
             
-
             # Next, we calculate the forecast covariance and forecast error.
             # If we don't know the observational variance, then we need
             # to keep track of the prior-to-posterior updating of our distribution
@@ -250,7 +251,6 @@ class FFBS(object):
             else:
                 self.Q[t]   = F[t].T.dot(self.R[t]).dot(F[t]) + V # [r,n] x [n,n] x [n,r]
                   
-            
             # The ratio of R / Q gives us an estimate of the split between
             # prior covariance and forecast covariance.
             if self.unknown_obs_var and t > 0 :
@@ -260,7 +260,7 @@ class FFBS(object):
             if r == 1:
                 self.A[t] = self.R[t].dot(F[t])/np.squeeze(self.Q[t])
                 self.C[t] = self.prefactor * (self.R[t] - self.A[t].dot(self.A[t].T)*np.squeeze(self.Q[t]))
-            else:
+            else: # This branch is probably broken as I have not tested any of it for a mv case.
                 self.A[t] = self.R[t].dot(F[t]).dot(np.linalg.inv(self.Q[t]))
                 self.C[t] = self.prefactor * (self.R[t] - self.A[t].dot(self.Q[t]).dot(self.A[t].T))
             
@@ -268,15 +268,12 @@ class FFBS(object):
             # of the prior and the error, weighted by the adaptive coefficient.            
             self.m[t,:]   = self.a[t]+self.A[t].dot(self.e[t])
             
-            
             # The last thing we do in each loop iteration is tabulate the current
             # step's contribution to the overall log-likelihood.
             if self.unknown_obs_var:
                 self.log_likelihood[t] = student_t.logpdf(self.e[t], self.gamma_n[t-1], scale=np.sqrt(self.Q[t]))
             else:
                 self.log_likelihood[t] = norm.logpdf(self.e[t], scale=np.sqrt(self.Q[t]))
-               
-
 
         if self.nancheck:
             try:
@@ -290,10 +287,7 @@ class FFBS(object):
         self.mae = np.mean(np.abs(self.e))
         self.r2 = r2_score(self.Y,self.f)
         self.ll_sum = self.log_likelihood.sum()
-        
-                                                 
-                                                     
-                                                    
+                                                  
         
     def backward_smooth(self):
         """ This method is used to compute retrospective estimates
@@ -330,6 +324,7 @@ class FFBS(object):
                 if t == ( self.T-1):
                     self.m_r[t] = self.m[t] 
                     self.C_r[t] = self.C[t]
+                    
                     if self.unknown_obs_var:
                         # Set smoothed estimate of variance to be 
                         # the last forward-filtered estimate of variance
@@ -338,15 +333,13 @@ class FFBS(object):
                     
                 else:
                     self.B[t]   = self.C[t].dot(G.T).dot(np.linalg.inv(self.R[t+1]))
-                    
                     self.m_r[t] = self.m[t] + self.B[t].dot(self.m_r[t+1] -  self.a[t+1])
                     self.C_r[t] = self.C[t] + self.B[t].dot(self.C_r[t+1] -  self.R[t+1]).dot(self.B[t].T)
                     if self.unknown_obs_var:
                         self.s_r[t] = ((1.0 - self.delta_v) / self.s[t] + self.delta_v / self.s_r[t+1])**-1
                         self.n_r[t] = (1-self.delta_v) * self.gamma_n[t] + self.delta_v * self.gamma_n[t+1]
                         self.C_r[t] = self.C_r[t] * self.s_r[t]/self.s[t]
-                                     
-                                     
+                                    
         if self.nancheck:
             for array in [self.m_r,self.C_r,self.B]:
                 try:
@@ -383,8 +376,7 @@ class FFBS(object):
                 self.sample_m[-1]  = self.m[-1]
                 self.sample_C[-1]  = self.sample_v *self.C[-1]/self.s[-1]
                 self.theta[-1,:,i] = np.random.multivariate_normal(self.sample_m[-1], self.sample_C[-1])
-                
-
+ 
                 # We iteratively draw a sample of theta, condition on that sample and draw
                 # a new value of theta for the preceding timestep.
                 for t in range(T-2,-1,-1):

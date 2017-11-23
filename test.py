@@ -9,7 +9,7 @@ import numpy.testing as npt
 class TestCases(unittest.TestCase):
 
     def test_ar(self):
-        """This test case simulates an AR(3) model over 10^5 timesteps with minimal variance
+        """ This test case simulates an AR(3) model over 10^5 timesteps with minimal variance
         and attempts to recover the original autoregression coefficients used to generate the data."""
 
         coefficients = np.asarray([-0.5,0.2,-0.1])
