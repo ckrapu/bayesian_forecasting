@@ -229,22 +229,24 @@ class FFBS(object):
             
 
             # Next, we calculate the forecast covariance and forecast error.
+            # If we don't know the observational variance, then we need
+            # to keep track of the prior-to-posterior updating of our distribution
+            # over the observational variance.
             if self.unknown_obs_var:
                 
                 if t == 0:
                     self.Q[t]       = F[t].T.dot(self.R[t]).dot(F[t]) + self.prior_s
                     self.gamma_n[t] = 1.0
                     self.r[t]       = (self.gamma_n[t] + self.e[t]**2 / self.Q[t]) / (self.gamma_n[t] + 1)
-                    
-                  
+                 
                 else:
                     self.Q[t]       = F[t].T.dot(self.R[t]).dot(F[t]) + self.s[t-1]
                     self.gamma_n[t] = self.delta_v * self.gamma_n[t-1]+1
                     self.r[t]       = (self.gamma_n[t] + self.e[t]**2 / self.Q[t]) / (self.gamma_n[t] + 1)
                     self.s[t]       = self.r[t] * self.s[t-1]
-                    
-                
-                
+            
+            # In the case where the observational variance is known, the forecast variance
+            # is expressed much more succinctly.
             else:
                 self.Q[t]   = F[t].T.dot(self.R[t]).dot(F[t]) + V # [r,n] x [n,n] x [n,r]
                   
@@ -294,10 +296,12 @@ class FFBS(object):
                                                     
         
     def backward_smooth(self):
+        """ This method is used to compute retrospective estimates
+        of the DLM state vector after we have made a first pass over the
+        data with the forward_filtering method.""""
         
         # TODO: add in retrospective analysis for unknown variance
         
-
         # None of the necessary estimates required for the BS step will be ready
         # if we haven't already applied the forward filtering.
         try:
@@ -305,13 +309,15 @@ class FFBS(object):
         except SystemError:
             print('The forward filtering process has not been applied yet.')
 
-
-        # Backward smoothing
+        # These are the main quantities we care about.
+        # The suffix _r indicates that these are from retrospective analyses.
+        # s_r and n_r are used only if the observational variance is constant but unknown.   
         self.m_r =  np.zeros([self.T,self.n])         # Retrospective mean over state distribution
         self.C_r =  np.zeros([self.T,self.n,self.n])  # Retrospective posterior covariance over state
         self.s_r =  np.zeros(self.T)                  # Retrospective smoothed estimate of variance
         self.n_r =  np.zeros(self.T)                  # Retrospective smoothed degrees of freedom
         
+        # The loop runs from the final time step to the first.
         for t in range(self.T-1,-1,-1):
                 # Unlike in the case of an unknown evolution matrix with discounting,
                 # we don't need the inverse of G or G transpose.
@@ -349,61 +355,58 @@ class FFBS(object):
                 except:
                     print 'NaN values encountered in backward smoothing.'
 
-    def backward_sample(self):
+    def backward_sample(self,num_samples = 1):
+        """ This method is used to sample a trajectory of possible DLM states
+        through time. It can only be used once the object has gone through filtering
+        and backward smoothing."""
         
         T = self.T
-        self.theta = np.zeros([T,self.n])
-        self.sample_C = np.zeros([T,self.n,self.n])
-        self.sample_m = np.zeros([T,self.n])
-    
-        # Depending on whether the observational variance is known or 
-        # not, we proceed using one of two different recursive sampling algorithms.
-        if self.unknown_obs_var:
-            
-            # First, we draw a sample standard deviation (root variance) from
-            # the gamma posteror over the precision and take its square root.
-            self.rv = np.sqrt(1.0 / np.random.gamma(self.gamma_n[-1]/2.0,scale = 2.0 / (self.gamma_n[-1]*self.s[-1])))
-            
-            # Second, we draw a bunch of vectors from the standard normal that we
-            # will later rescale and add to the sample mean to get sampled values
-            # of theta.
-            random_normal = np.random.randn(self.n,self.T)
-            
-            # At the beginning (aka the last time step) we assume that the prior
-            # over the sample theta is given by our posterior over the state vector
-            # at the last time step.
-            self.sample_m[-1] = self.m[-1]
-            self.theta[-1] = self.sample_m[-1] + self.rv * (np.linalg.cholesky(self.C[-1]/self.s[-1])).dot(random_normal[:,-1])
-            self.sample_C[-1] = self.C[-1]
-            
-            # We iteratively draw a sample of theta, condition on that sample and draw
-            # a new value of theta for the preceding timestep.
-            for t in range(T-2,-1,-1):
-                self.t = t
-                self.sample_B = self.C[t].dot(self.G.T).dot(np.linalg.inv(self.R[t+1]))
-                self.sample_C[t] = self.C[t] - self.sample_B.dot(self.sample_C[t] - self.R[t+1]).dot(self.sample_B.T)
-                self.sample_m[t] = self.m[t] + self.sample_B.dot(self.theta[t+1] - self.a[t+1])
+        self.theta = np.zeros([T,self.n,num_samples])
+        
+        # TODO: optimize code to vectorize the sample drawing
+        for i in range(num_samples):
+            self.sample_C = np.zeros([T,self.n,self.n])
+            self.sample_m = np.zeros([T,self.n])
+
+            # Depending on whether the observational variance is known or 
+            # not, we proceed using one of two different recursive sampling algorithms.
+            if self.unknown_obs_var:
+
+                # First, we draw a sample variance by making a gamma draw from the 
+                # posterior over the precision and inverting it.
+                self.sample_precision = np.random.gamma(self.gamma_n[-1]/2.0,scale = 2.0 / (self.gamma_n[-1]*self.s[-1]))
+                self.sample_v = 1.0 / sample_precision
+
+                # At the beginning (aka the last time step) we assume that the prior
+                # over the sample theta is given by our posterior over the state vector
+                # at the last time step.
+                self.sample_m[-1]  = self.m[-1]
+                self.sample_C[-1]  = self.sample_v *self.C[-1]/self.s[-1]
+                self.theta[-1,:,i] = np.random.multivariate_normal(self.sample_m[-1], self.sample_C[-1])
                 
-                # The Cholesky decomposition of C is akin to taking the square root of a variance
-                # to get a standard deviation. This is just a multivariate way of rescaling a 
-                # standard normal by a standard deviation to get a draw from a nonstandard normal
-                # distribution. 
-                self.theta[t] = self.sample_m[t]
-                + self.rv*np.linalg.cholesky(self.sample_C[t] / self.s[t]).dot(random_normal[:,t])
-                
-        else:
-            # The backward sampling is much simpler if the observational variance is known.
-            # see page 130 in Prado & West for the details.
-            self.sample_m[-1] = self.m[-1]
-            self.sample_C[-1] = self.C[-1]
-            self.theta[-1] = np.random.multivariate_normal(self.sample_m[-1], self.sample_C[-1])
-            for t in range(T-2,-1,-1):
-                self.t = t
-                self.sample_m[t] = self.m[t+1] + self.B[t].dot(self.theta[t+1] - self.a[t+1])
-                self.sample_C[t] = self.C[t] - self.B[t].dot(self.R[t+1]).dot(self.B[t].T)
-                self.theta[t] = np.random.multivariate_normal(self.sample_m[t],self.sample_C[t])
-                
-            
+
+                # We iteratively draw a sample of theta, condition on that sample and draw
+                # a new value of theta for the preceding timestep.
+                for t in range(T-2,-1,-1):
+                    self.t = t
+                    self.sample_B     = self.C[t].dot(self.G.T).dot(np.linalg.inv(self.R[t+1]))
+                    self.sample_C[t]  = self.sample_v * (self.C[t] - self.sample_B.dot(self.sample_C[t] - self.R[t+1]).dot(self.sample_B.T)) / self.s[t]
+                    self.sample_m[t]  = self.m[t] + self.sample_B.dot(self.theta[t+1,:,i] - self.a[t+1])
+                    self.theta[t,:,i] = np.random.multivariate_normal(self.sample_m[t], self.sample_C[t])
+
+            else:
+                # The backward sampling is much simpler if the observational variance is known.
+                # see page 130 in Prado & West for the details.
+                self.sample_m[-1]  = self.m[-1]
+                self.sample_C[-1]  = self.C[-1]
+                self.theta[-1,:,i] = np.random.multivariate_normal(self.sample_m[-1], self.sample_C[-1])
+                for t in range(T-2,-1,-1):
+                    self.t = t
+                    self.sample_m[t] = self.m[t+1] + self.B[t].dot(self.theta[t+1,:,i] - self.a[t+1])
+                    self.sample_C[t] = self.C[t] - self.B[t].dot(self.R[t+1]).dot(self.B[t].T)
+                    self.theta[t,:,i] = np.random.multivariate_normal(self.sample_m[t],self.sample_C[t])
+
+
         if self.nancheck:
             assert ~np.any(np.isnan(self.theta))
                 
@@ -414,10 +417,13 @@ class FFBS(object):
         """ Wrapper for scatter plot showing the predicted
         versus observed values"""
         
+        # There won't be anything to plot if we haven't done the forward filtering.
         assert self.is_filtered
         
+        # This automatically determines the figure limits
         low = min([np.min(self.f),np.min(self.Y)]) * 0.9
         high = max([np.max(self.f),np.max(self.Y)])* 1.1
+        
         plt.figure(figsize = figsize )
         plt.scatter(self.Y,self.f,color='k')
         plt.ylabel('Predicted',fontsize = 14)
@@ -425,6 +431,8 @@ class FFBS(object):
         plt.xlim([low,high])
         plt.ylim([low,high])
         plt.plot([low,high],[low,high],linestyle='--',color = 'k')
+        
+        # Equal axis units are very helpful.
         plt.gca().set_aspect('equal', adjustable='box')
         
         return plt.gca()

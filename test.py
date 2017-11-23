@@ -74,7 +74,6 @@ class TestCases(unittest.TestCase):
         Y = signal + np.random.randn(T) * 0.5
         F = signal[:,np.newaxis,np.newaxis]
         G = np.identity(1)
-
         m0 = np.ones(1)* 0.5
         C0 = np.identity(1) * 0.5
         V = 1.0
@@ -107,11 +106,8 @@ class TestCases(unittest.TestCase):
         median = np.median(theta)
         median_error = np.abs(1.0- median)
         mean_error   = np.abs(1.0 - mean)
-        self.assertTrue(median_error < 0.2 and mean_error < 0.2)
-        
-        
-        
-        
+        self.assertTrue(median_error < 0.4 and mean_error < 0.4)
+         
     def test_cyclic_discount(self):
         """ This test case is identical to 'test_cyclic' save for 
         specification of an innovation discount factor instead of a 
