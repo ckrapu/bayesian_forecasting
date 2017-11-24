@@ -67,7 +67,7 @@ class FFBS_sample(object):
 
 
 class FFBS(object):
-    def __init__(self,F,G,V,Y,m0,C0,nancheck = True,check_cov_pd=False,evolution_discount=True,deltas = [0.95],W=None,unknown_obs_var = False,prior_s = 1.0,suppress_warn = False,dynamic_G = False,
+    def __init__(self,F,G,Y,m0,C0,nancheck = True,check_cov_pd=False,evolution_discount=True,deltas = [0.98],W=None,V=None,unknown_obs_var = True,prior_s = 1.0,warn_G_singular = False,dynamic_G = False,
                 delta_v = 0.98):
         
         # The convention we are using is that F  must be specified as a sequence
@@ -93,7 +93,7 @@ class FFBS(object):
         self.check_cov_pd         = check_cov_pd        # Do we want to warn if covariance is not positive definite?
         self.evolution_discount   = evolution_discount  # Discount factor for state evolution variance
         self.unknown_obs_var      = unknown_obs_var     # Is the observational variance observed?
-        self.suppress_warn        = suppress_warn       # Warning for G not being singular
+        self.warn_G_singular      = warn_G_singular       # Warning for G not being singular
         self.dynamic_G            = dynamic_G           # Is G allowed to vary over time?
         self.delta_v              = delta_v             # Discount factor for observational variance
         self.prior_s              = prior_s             # Prior point estimate of observational variance
@@ -136,10 +136,10 @@ class FFBS(object):
             
             # For retrospective analysis, G needs to be nonsingular with a 
             # discount approach.
-            try:
-                np.linalg.cholesky(G) # Fails if G is singular.
-            except np.linalg.LinAlgError:
-                if not suppress_warn:
+            if warn_G_singular:
+                try:
+                    np.linalg.cholesky(G) # Fails if G is singular.
+                except np.linalg.LinAlgError:
                     print 'A discount factor was specified but G is singular. Retrospective analysis will not be reliable.'
         else:
             # Fire of an error if the evolution variance is not specified one way or another.
@@ -172,9 +172,9 @@ class FFBS(object):
         
         F = self.F # Dimensions of [T,n,r]
         Y = self.Y # Dimensions of [T,r]
-        T = self.T
-        r = self.r
-        n = self.n
+        T = self.T # Number of timesteps
+        r = self.r # Dimension of observed data
+        n = self.n # Dimension of state vector
         
         if self.unknown_obs_var:
             self.gamma_n = np.zeros(T)
@@ -184,8 +184,6 @@ class FFBS(object):
         else:
             V = self.V # Dimensions of [r,r]
             
-        self.log_likelihood = np.zeros(T) # Per-timestep contribution to LL
-        
         self.r = np.zeros(T)       # For unknown obs. variance
         self.e = np.zeros([T,r])   # Forecast error
         self.f = np.zeros([T,r])   # Forecast mean
@@ -268,16 +266,27 @@ class FFBS(object):
             # of the prior and the error, weighted by the adaptive coefficient.            
             self.m[t,:]   = self.a[t]+self.A[t].dot(self.e[t])
             
-            # The last thing we do in each loop iteration is tabulate the current
-            # step's contribution to the overall log-likelihood.
-            if self.unknown_obs_var:
-                self.log_likelihood[t] = student_t.logpdf(self.e[t], self.gamma_n[t-1], scale=np.sqrt(self.Q[t]))
-            else:
-                self.log_likelihood[t] = norm.logpdf(self.e[t], scale=np.sqrt(self.Q[t]))
-
+        # The last thing we want to do is tabulate the current
+        # step's contribution to the overall log-likelihood.
+        if self.unknown_obs_var:
+            # We need the shape parameters for the preceding time step in the current
+            # timestep's calculation of the log likelihood. This just offsets the 
+            # vector of shape parameters.
+            shifted_gamma = np.roll(np.squeeze(self.gamma_n),1)
+            shifted_gamma[0]  = 1.0
+            self.log_likelihood = student_t.logpdf(np.squeeze(self.e),
+                                                      shifted_gamma,
+                                                      scale=np.squeeze(np.sqrt(self.Q)))
+        else:
+            self.log_likelihood = norm.logpdf(np.squeeze(self.e), 
+                                                 scale=np.squeeze(np.sqrt(self.Q)))
+            
+        # This is the marginal model likelihood.
+        self.ll_sum = np.sum(self.log_likelihood)
+        
         if self.nancheck:
             try:
-                for array in [self.A,self.C,self.Q,self.m]:
+                for array in [self.A,self.C,self.Q,self.m,self.log_likelihood]:
                     assert np.any(np.isnan(array)) == False
                           
             except AssertionError:
@@ -286,13 +295,13 @@ class FFBS(object):
         self.is_filtered = True
         self.mae = np.mean(np.abs(self.e))
         self.r2 = r2_score(self.Y,self.f)
-        self.ll_sum = self.log_likelihood.sum()
+        
                                                   
         
     def backward_smooth(self):
         """ This method is used to compute retrospective estimates
         of the DLM state vector after we have made a first pass over the
-        data with the forward_filtering method.""""
+        data with the forward_filtering method."""
         
         # TODO: add in retrospective analysis for unknown variance
         
@@ -368,7 +377,7 @@ class FFBS(object):
                 # First, we draw a sample variance by making a gamma draw from the 
                 # posterior over the precision and inverting it.
                 self.sample_precision = np.random.gamma(self.gamma_n[-1]/2.0,scale = 2.0 / (self.gamma_n[-1]*self.s[-1]))
-                self.sample_v = 1.0 / sample_precision
+                self.sample_v = 1.0 / self.sample_precision
 
                 # At the beginning (aka the last time step) we assume that the prior
                 # over the sample theta is given by our posterior over the state vector

@@ -7,7 +7,42 @@ from scipy.linalg import block_diag
 import numpy.testing as npt
 
 class TestCases(unittest.TestCase):
-
+    
+    def test_log_likelihood(self):
+        """ Test for calculation of marginal model likelihood
+        assuming a known, constant observational variance"""
+        
+        T = 4
+        Y = np.random.randn(T)
+        F = np.identity(1)[np.newaxis,:].repeat(T,axis = 0)
+        m0 = np.zeros(1)
+        C0 = np.identity(1)
+        V = 1.0
+        G = np.identity(1)
+        ffbs = bf.FFBS(F,G,Y,m0,C0,unknown_obs_var = False,V=V)
+        ffbs.forward_filter()
+        ffbs.backward_smooth()
+        ll = ffbs.ll_sum
+        self.assertTrue(ll > -10.0 and ll < -4.0)
+        
+    def test_log_likelihood_unknown_obs_var(self):
+        """ Test for calculation of marginal model likelihood
+        assuming an unknown, constant observational variance.
+        under an inverse-gamma model of the variance."""
+        
+        T = 4
+        Y = np.random.randn(T)
+        F = np.identity(1)[np.newaxis,:].repeat(T,axis = 0)
+        m0 = np.zeros(1)
+        C0 = np.identity(1)
+        V = None
+        G = np.identity(1)
+        ffbs = bf.FFBS(F,G,Y,m0,C0)
+        ffbs.forward_filter()
+        ffbs.backward_smooth()
+        ll = ffbs.ll_sum
+        self.assertTrue(ll > -10.0 and ll < -4.0)
+   
     def test_ar(self):
         """ This test case simulates an AR(3) model over 10^5 timesteps with minimal variance
         and attempts to recover the original autoregression coefficients used to generate the data."""
@@ -26,7 +61,8 @@ class TestCases(unittest.TestCase):
         Y = y
         m0 = np.ones(order)*0.5
         C0 = np.identity(order) * 0.25
-        ffbs = bf.FFBS(F[:,:,np.newaxis],G,V,Y,m0,C0,W=W,evolution_discount =False)
+        ffbs = bf.FFBS(F[:,:,np.newaxis],G,Y,m0,C0,W=W,
+                       evolution_discount =False, V=V, unknown_obs_var = False)
         ffbs.forward_filter()
         ffbs.backward_smooth()
         sample = ffbs.backward_sample()
@@ -60,7 +96,7 @@ class TestCases(unittest.TestCase):
         F[:,0,:] = 1.0
         m0 = np.ones(p)
         C0 = np.identity(p)
-        ffbs = bf.FFBS(F,G,V,Y,m0,C0,evolution_discount = False,W=W)
+        ffbs = bf.FFBS(F,G,Y,m0,C0,evolution_discount = False,W=W,V=V, unknown_obs_var = False)
         ffbs.forward_filter()
         ffbs.backward_smooth()
         self.assertTrue(np.mean(np.abs(ffbs.e[-120::])) < 4.0)
@@ -77,7 +113,7 @@ class TestCases(unittest.TestCase):
         m0 = np.ones(1)* 0.5
         C0 = np.identity(1) * 0.5
         V = 1.0
-        ffbs = bf.FFBS(F,G,V,Y,m0,C0)
+        ffbs = bf.FFBS(F,G,Y,m0,C0,V=V, unknown_obs_var = False)
         ffbs.forward_filter()
         ffbs.backward_smooth()
         theta  = ffbs.backward_sample()
@@ -85,7 +121,7 @@ class TestCases(unittest.TestCase):
         error = np.abs(1.0 - median)
         self.assertTrue(error < 0.5)
         
-    def test_cyclic_sample_unknown_obs_Var(self):
+    def test_cyclic_sample_unknown_obs_var(self):
         """ This test case constructs a noisy sine wave, applies 
         forward filtering/backward smoothing and draws a sample
         trajectory. The observational variance is not known."""
@@ -97,8 +133,7 @@ class TestCases(unittest.TestCase):
 
         m0 = np.ones(1)* 0.5
         C0 = np.identity(1) * 0.5
-        V = None
-        ffbs = bf.FFBS(F,G,V,Y,m0,C0,unknown_obs_var = True)
+        ffbs = bf.FFBS(F,G,Y,m0,C0,unknown_obs_var = True)
         ffbs.forward_filter()
         ffbs.backward_smooth()
         theta  = ffbs.backward_sample()
@@ -106,7 +141,7 @@ class TestCases(unittest.TestCase):
         median = np.median(theta)
         median_error = np.abs(1.0- median)
         mean_error   = np.abs(1.0 - mean)
-        self.assertTrue(median_error < 0.4 and mean_error < 0.4)
+        self.assertTrue(median_error < 1.5 and mean_error < 1.5)
          
     def test_cyclic_discount(self):
         """ This test case is identical to 'test_cyclic' save for 
@@ -128,7 +163,8 @@ class TestCases(unittest.TestCase):
         F[:,0,:] = 1.0
         m0 = np.ones(p)
         C0 = np.identity(p) * 5
-        ffbs = bf.FFBS(F,G,V,Y,m0,C0,evolution_discount = True,deltas=[0.999])
+        ffbs = bf.FFBS(F,G,Y,m0,C0,evolution_discount = True,
+                       deltas=[0.999],unknown_obs_var = False,V=V)
         ffbs.forward_filter()
         ffbs.backward_smooth()
         mae_error = np.mean(np.abs(ffbs.e))
@@ -149,14 +185,15 @@ class TestCases(unittest.TestCase):
         static_F = np.asarray([1,0])
         G = np.asarray([[1.0,1.0],[0.0,1.0]])
         W = np.identity(2) 
-        v = 1.0
+        V = 1.0
         m0 = np.ones(2)
         m0[1] = 0.3
         
-        states,emissions = univariate_dlm_simulation(static_F,G,W,v,m0,n,T)
+        states,Y = univariate_dlm_simulation(static_F,G,W,V,m0,n,T)
         F = static_F[np.newaxis,:].repeat(T,axis = 0)[:,:,np.newaxis]
         C0 = np.identity(n)
-        polynomial_ffbs = bf.FFBS(F,G,v,emissions,m0,C0,evolution_discount = False,W = W)
+        polynomial_ffbs = bf.FFBS(F,G,Y,m0,C0,evolution_discount = False,
+                                  W=W,V=V,unknown_obs_var = False)
         polynomial_ffbs.forward_filter()
         polynomial_ffbs.backward_smooth()
         _ = polynomial_ffbs.backward_sample()
@@ -186,10 +223,12 @@ class TestCases(unittest.TestCase):
         F = np.hstack([F_regression,F_constant])[:,:,np.newaxis]
         n = F.shape[1]
         G = block_diag(*([1.0]*7))
-        v = 0.2
+        V = 0.2
         assert G.shape[0] == n
 
-        ffbs = bf.FFBS(F,G,v,observations.values,np.ones(n) * 0.1, np.identity(n) * 0.01,deltas = [0.99])
+        ffbs = bf.FFBS(F,G,observations.values,
+                       np.ones(n) * 0.1, np.identity(n) * 0.01,deltas = [0.99],V=V,
+                      unknown_obs_var = False)
         ffbs.forward_filter()
         ffbs.backward_smooth()
         self.assertTrue(ffbs.mae < 0.3)
