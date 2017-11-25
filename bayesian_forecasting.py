@@ -1,5 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
+import itertools
 from sklearn.metrics import r2_score
 from scipy.stats import norm
 from scipy.stats import t as student_t
@@ -65,10 +66,46 @@ class FFBS_sample(object):
 
         return new_estimate
 
+class GridSearchDiscountFFBS(object):
+    """This class is designed to simplify the selection of discount factors
+    in the case of unknown observational and evolution variance for the DLM.
+    Currently, only an exhaustive grid search is allowed."""
+    #TODO: implement latin hypercube sampling and allow for distinct
+    # model subcomponent evolution variances.
+    def __init__(self, evo_discount_range, obs_discount_range,
+                 F,G,Y,m0,C0,prior_s = 1.0):
+        
+        self.evo_list = list(evo_discount_range)
+        self.obs_list = list(obs_discount_range)
+        
+         
+        # The product iterator needs to be explictly enumerated. 
+        # the call to list() forces the evaluation.
+        self.combinations = list(itertools.product(evo_discount_range,obs_discount_range))
+        self.num_combinations = len(self.combinations)
+        self.log_likelihoods = np.zeros(self.num_combinations)
+        self.models = []
+        
+        for i,pair in enumerate(self.combinations):
+            ffbs_model = FFBS(F,G,Y,m0,C0,prior_s=prior_s,
+                              evo_discount_factor = [pair[0]],
+                              obs_discount_factor = pair[1])
+            ffbs_model.forward_filter()
+            self.models.append(ffbs_model)
+            self.log_likelihoods[i] = ffbs_model.ll_sum
+        
+        best = self.combinations[np.argmax(self.log_likelihoods)]
+        self.best_evo = best[0]
+        self.best_obs = best[1]
+       
 
+    
 class FFBS(object):
-    def __init__(self,F,G,Y,m0,C0,nancheck = True,check_cov_pd=False,evolution_discount=True,deltas = [0.98],W=None,V=None,unknown_obs_var = True,prior_s = 1.0,warn_G_singular = False,dynamic_G = False,
-                delta_v = 0.98):
+    def __init__(self,F,G,Y,m0,C0,nancheck = True,check_cov_pd=False,
+                 evolution_discount=True,obs_discount = True,
+                 evo_discount_factor = [0.98],obs_discount_factor = 0.98,
+                 W=None,V=None,prior_s = 1.0,warn_G_singular = False,dynamic_G = False,
+                ):
         
         # The convention we are using is that F  must be specified as a sequence
         # of [n,r] arrays respectively.
@@ -92,10 +129,10 @@ class FFBS(object):
          
         self.check_cov_pd         = check_cov_pd        # Do we want to warn if covariance is not positive definite?
         self.evolution_discount   = evolution_discount  # Discount factor for state evolution variance
-        self.unknown_obs_var      = unknown_obs_var     # Is the observational variance observed?
+        self.obs_discount      = obs_discount     # Is the observational variance observed?
         self.warn_G_singular      = warn_G_singular       # Warning for G not being singular
         self.dynamic_G            = dynamic_G           # Is G allowed to vary over time?
-        self.delta_v              = delta_v             # Discount factor for observational variance
+        self.obs_discount_factor              = obs_discount_factor             # Discount factor for observational variance
         self.prior_s              = prior_s             # Prior point estimate of observational variance
         
         self.is_filtered          = False
@@ -120,7 +157,7 @@ class FFBS(object):
         
         # If the matrix V is not specified (and it usually isn't) the the observational
         # variance is treated as an unknown variable.
-        if self.unknown_obs_var: 
+        if self.obs_discount: 
             assert V is None
             self.prior_s = prior_s
                   
@@ -152,13 +189,13 @@ class FFBS(object):
         # with one delta for each dimension of the state vector.
         # If there is only one delta passed in, then we'll use it as the 
         # global discount factor.
-        if len(deltas) == 1:
-            self.discount_matrix = np.identity(self.n) *(1.0 /  deltas[0])
+        if len(evo_discount_factor) == 1:
+            self.discount_matrix = np.identity(self.n) *(1.0 /  evo_discount_factor[0])
 
-        elif len(deltas) == self.n:
+        elif len(evo_discount_factor) == self.n:
             # The diagonal entries of the discount matrix need to be 
             # 1/delta. We just invert a diagonal matrix to get that.
-            self.discount_matrix = np.linalg.inv(np.diag(deltas))
+            self.discount_matrix = np.linalg.inv(np.diag(evo_discount_factor))
 
         else:
             raise ValueError('Evolution discount factors incorrectly specified.')
@@ -176,7 +213,7 @@ class FFBS(object):
         r = self.r # Dimension of observed data
         n = self.n # Dimension of state vector
         
-        if self.unknown_obs_var:
+        if self.obs_discount:
             self.gamma_n = np.zeros(T)
             self.s       = np.zeros(T)
             self.s[0]    = self.prior_s
@@ -231,7 +268,7 @@ class FFBS(object):
             # If we don't know the observational variance, then we need
             # to keep track of the prior-to-posterior updating of our distribution
             # over the observational variance.
-            if self.unknown_obs_var:
+            if self.obs_discount:
                 
                 if t == 0:
                     self.Q[t]       = F[t].T.dot(self.R[t]).dot(F[t]) + self.prior_s
@@ -240,7 +277,7 @@ class FFBS(object):
                  
                 else:
                     self.Q[t]       = F[t].T.dot(self.R[t]).dot(F[t]) + self.s[t-1]
-                    self.gamma_n[t] = self.delta_v * self.gamma_n[t-1]+1
+                    self.gamma_n[t] = self.obs_discount_factor * self.gamma_n[t-1]+1
                     self.r[t]       = (self.gamma_n[t] + self.e[t]**2 / self.Q[t]) / (self.gamma_n[t] + 1)
                     self.s[t]       = self.r[t] * self.s[t-1]
             
@@ -251,7 +288,7 @@ class FFBS(object):
                   
             # The ratio of R / Q gives us an estimate of the split between
             # prior covariance and forecast covariance.
-            if self.unknown_obs_var and t > 0 :
+            if self.obs_discount and t > 0 :
                 self.prefactor = self.s[t]/self.s[t-1]
             else:
                 self.prefactor = 1.0
@@ -268,7 +305,7 @@ class FFBS(object):
             
         # The last thing we want to do is tabulate the current
         # step's contribution to the overall log-likelihood.
-        if self.unknown_obs_var:
+        if self.obs_discount:
             # We need the shape parameters for the preceding time step in the current
             # timestep's calculation of the log likelihood. This just offsets the 
             # vector of shape parameters.
@@ -334,7 +371,7 @@ class FFBS(object):
                     self.m_r[t] = self.m[t] 
                     self.C_r[t] = self.C[t]
                     
-                    if self.unknown_obs_var:
+                    if self.obs_discount:
                         # Set smoothed estimate of variance to be 
                         # the last forward-filtered estimate of variance
                         self.s_r[t] = self.s[t]
@@ -344,9 +381,9 @@ class FFBS(object):
                     self.B[t]   = self.C[t].dot(G.T).dot(np.linalg.inv(self.R[t+1]))
                     self.m_r[t] = self.m[t] + self.B[t].dot(self.m_r[t+1] -  self.a[t+1])
                     self.C_r[t] = self.C[t] + self.B[t].dot(self.C_r[t+1] -  self.R[t+1]).dot(self.B[t].T)
-                    if self.unknown_obs_var:
-                        self.s_r[t] = ((1.0 - self.delta_v) / self.s[t] + self.delta_v / self.s_r[t+1])**-1
-                        self.n_r[t] = (1-self.delta_v) * self.gamma_n[t] + self.delta_v * self.gamma_n[t+1]
+                    if self.obs_discount:
+                        self.s_r[t] = ((1.0 - self.obs_discount_factor) / self.s[t] + self.obs_discount_factor / self.s_r[t+1])**-1
+                        self.n_r[t] = (1-self.obs_discount_factor) * self.gamma_n[t] + self.obs_discount_factor * self.gamma_n[t+1]
                         self.C_r[t] = self.C_r[t] * self.s_r[t]/self.s[t]
                                     
         if self.nancheck:
@@ -372,7 +409,7 @@ class FFBS(object):
 
             # Depending on whether the observational variance is known or 
             # not, we proceed using one of two different recursive sampling algorithms.
-            if self.unknown_obs_var:
+            if self.obs_discount:
 
                 # First, we draw a sample variance by making a gamma draw from the 
                 # posterior over the precision and inverting it.
