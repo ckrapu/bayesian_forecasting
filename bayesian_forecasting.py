@@ -8,104 +8,120 @@ from scipy.stats import t as student_t
 class FFBS_sample(object):
     """An FFBS_sample object is used as a sampling step in a PyMC3 model 
     in order to draw samples of the DLM state vector conditional on 
-    emissions/observations and the various DLM structures F,G,W,V."""
-
-    def __init__(self,vars,F,G,r,n,observationsVarName='observations',
-                 check_cov_pd = False):
+    emissions/observations and the various DLM structures F,G,W,V. The dict
+    'varnames_mapping' links the names of the relevant DLM quantities in the
+    larger PyMC3 model to their desired position in the FFBS data structure."""
+    
+    # The FFBS_sample object is only initialized once in every MCMC run.
+    # Therefore, the only arguments that the constructor takes should be 
+    # variables which DO NOT change across Monte Carlo samples. This is 
+    # why the observations Y are not passed in here - they can change from
+    # MC iteration to iteration and thus need to be specified in the body
+    # of the 'step' method.
+    def __init__(self,vars,F,G,
+                 varnames_mapping={'m0':'m0',
+                                   'C0':'C0',
+                                   's0':'s0',
+                                   'state':'state',
+                                   'V':'V',
+                                   'W':'W',
+                                   'Y':'Y'},
+                 exponentiate_W = False,exponentiate_V = False,evo_discount_factor = [0.99],obs_discount_factor = 0.99,calculate_ll = False):
                
         self.F = F
         self.G = G
-        self.r = r
-        self.n = n
         
         # The attribute 'vars' must be set for PyMC3 to 
         # handle this step object appropriately.
-        self.vars = vars
+        self.vars             = vars
+        self.varnames_mapping = varnames_mapping
         
-        # This is the string name given to the variable representing 
-        # the emissions in the DLM. Because we might call this 
-        # different things in the larger PyMC3 model, it's handy
-        # to be able to adjust this.
-        self.observationsVarName = observationsVarName
-        self.generates_stats = False
+        # Calculating the log-likelihood is not necessary to draw a MC sample and
+        # it might be really slow. Usually, we want to bypass this.
+        self.calculate_ll     = calculate_ll
         
-        # This flag controls whether we check our backward simulation covariances 
-        # for positive semi-definiteness.
-        self.check_cov_pd = check_cov_pd
+        self.evo_discount_factor = evo_discount_factor
+        self.obs_discount_factor = obs_discount_factor
         
+        # Since PyMC3 usually works with the logarithm of positive random variables,
+        # it is handy to be able to tell the FFBS sampler to exponentiate the log-variances
+        # and recover the actual variances.
+        self.exponentiate_W = exponentiate_W
+        self.exponentiate_V = exponentiate_V
+        
+                
 
     def step(self,estimate):
         
         F = self.F
         G = self.G
          
-        # PyMC3 may try to handle the scalar variances as log-transformed variables.
-        # Here, we specify that the evolution and observation variances are known, 
-        # fixed, and static.
+        # We don't need to specify the evolution and observation variances
+        # and if we don't, then we'll just use a discount approach later.
         try:
-            W  = np.identity(self.n)*estimate['w']
-        except KeyError:
-            W  = np.identity(self.n)*np.exp(estimate['w_log__'])
-        try: 
-            V  = np.identity(self.r)*estimate['v']
-        except KeyError:
-            V  = np.identity(self.r)*np.exp(estimate['v_log__'])
+            W_varname    = varnames_mapping['W']
+            W            = self.vars[W_varname]
+            evo_discount = False
+            assert np.all(W > 0)
             
-        m0 = estimate['m0']
+        except KeyError:
+            W  = None
+            evolution_discount = True
+            
+        try: 
+            V_varname    = varnames_mapping['V']
+            V            = self.vars[V_varname]
+            obs_discount = False
+            assert np.all(V > 0)
+            
+        except KeyError:
+            V  = None
+            obs_discount = True
         
-        # This is a hack to easily set the prior covariance.
-        C0 = W.copy()
-        Y  = estimate[self.observationsVarName]
+        
+        # The prior mean, state covariance
+        # and observations always need to be specified.
+        m0_varname = varnames_mapping['m0']
+        m0         = estimate[m0_varname]
+        
+        C0_varname = varnames_mapping['C0']
+        C0         = estimate[C0_varname]
+      
+        Y_varname = varnames_mapping['Y']
+        Y         = estimate[self.Y_varname]
+        
+        # If there is no observational variance specified, then
+        # we need to get the prior on the observational variance.
+        if V is None:
+            s0_varname = varnames_mapping['s0']
+            s0         = estimate[s0_varname]
 
-        self.ffbs = FFBS_known_variance(F,G,W,V,Y,m0,C0,check_cov_pd = self.check_cov_pd)
+        self.ffbs = ffbs(F,G,Y,m0,C0,W=W,V=V,s0=s0,
+                         obs_discount = obs_discount,
+                         evolution_discount = evolution_discount,
+                         obs_discount_factor = self.obs_discount_factor,
+                         evo_discount_factor = self.evo_discount_factor,
+                         calculate_ll = self.calculate_ll)
+        
         self.ffbs.forward_filter()
         self.ffbs.backward_smooth()
+        
         new_state = self.ffbs.backward_sample()
         new_estimate = estimate.copy()
-        new_estimate['state'] = new_state
+        
+        state_varname = varnames_mapping['state']
+        new_estimate[state_varname] = new_state
 
         return new_estimate
+  
 
-class GridSearchDiscountFFBS(object):
-    """This class is designed to simplify the selection of discount factors
-    in the case of unknown observational and evolution variance for the DLM.
-    Currently, only an exhaustive grid search is allowed."""
-    #TODO: implement latin hypercube sampling and allow for distinct
-    # model subcomponent evolution variances.
-    def __init__(self, evo_discount_range, obs_discount_range,
-                 F,G,Y,m0,C0,prior_s = 1.0):
-        
-        self.evo_list = list(evo_discount_range)
-        self.obs_list = list(obs_discount_range)
-        
-         
-        # The product iterator needs to be explictly enumerated. 
-        # the call to list() forces the evaluation.
-        self.combinations = list(itertools.product(evo_discount_range,obs_discount_range))
-        self.num_combinations = len(self.combinations)
-        self.log_likelihoods = np.zeros(self.num_combinations)
-        self.models = []
-        
-        for i,pair in enumerate(self.combinations):
-            ffbs_model = FFBS(F,G,Y,m0,C0,prior_s=prior_s,
-                              evo_discount_factor = [pair[0]],
-                              obs_discount_factor = pair[1])
-            ffbs_model.forward_filter()
-            self.models.append(ffbs_model)
-            self.log_likelihoods[i] = ffbs_model.ll_sum
-        
-        best = self.combinations[np.argmax(self.log_likelihoods)]
-        self.best_evo = best[0]
-        self.best_obs = best[1]
-       
 
-    
 class FFBS(object):
     def __init__(self,F,G,Y,m0,C0,nancheck = True,check_cov_pd=False,
                  evolution_discount=True,obs_discount = True,
                  evo_discount_factor = [0.98],obs_discount_factor = 0.98,
-                 W=None,V=None,prior_s = 1.0,warn_G_singular = False,dynamic_G = False,
-                ):
+                 W=None,V=None,s0 = 1.0,warn_G_singular = False,dynamic_G = False,
+                 calculate_ll = True):
         
         # The convention we are using is that F  must be specified as a sequence
         # of [n,r] arrays respectively.
@@ -133,7 +149,8 @@ class FFBS(object):
         self.warn_G_singular      = warn_G_singular       # Warning for G not being singular
         self.dynamic_G            = dynamic_G           # Is G allowed to vary over time?
         self.obs_discount_factor              = obs_discount_factor             # Discount factor for observational variance
-        self.prior_s              = prior_s             # Prior point estimate of observational variance
+        self.s0              = s0             # Prior point estimate of observational variance
+        self.calculate_ll    = calculate_ll   # Allows us to turn off likelihood calculations if too slow
         
         self.is_filtered          = False
         self.is_backward_smoothed = False
@@ -159,7 +176,7 @@ class FFBS(object):
         # variance is treated as an unknown variable.
         if self.obs_discount: 
             assert V is None
-            self.prior_s = prior_s
+            self.s0 = s0
                   
         else:
             self.V    = V    # Static observation variance with dimension [r,r]
@@ -196,7 +213,10 @@ class FFBS(object):
             # The diagonal entries of the discount matrix need to be 
             # 1/delta. We just invert a diagonal matrix to get that.
             self.discount_matrix = np.linalg.inv(np.diag(evo_discount_factor))
-
+            
+        # If neither 1 nor n discount factors was passed, then it's unclear
+        # exactly which discount factors align with which state elements.
+        # Later on, this could be reworked to allow for block discounting.
         else:
             raise ValueError('Evolution discount factors incorrectly specified.')
 
@@ -206,7 +226,6 @@ class FFBS(object):
         # These are just for convenience to reduce the number of times that 
         # these static arrays are referenced. The other arrays aren't treated
         # the same because they are frequently manipulated / changed.
-        
         F = self.F # Dimensions of [T,n,r]
         Y = self.Y # Dimensions of [T,r]
         T = self.T # Number of timesteps
@@ -216,7 +235,7 @@ class FFBS(object):
         if self.obs_discount:
             self.gamma_n = np.zeros(T)
             self.s       = np.zeros(T)
-            self.s[0]    = self.prior_s
+            self.s[0]    = self.s0
            
         else:
             V = self.V # Dimensions of [r,r]
@@ -271,7 +290,7 @@ class FFBS(object):
             if self.obs_discount:
                 
                 if t == 0:
-                    self.Q[t]       = F[t].T.dot(self.R[t]).dot(F[t]) + self.prior_s
+                    self.Q[t]       = F[t].T.dot(self.R[t]).dot(F[t]) + self.s0
                     self.gamma_n[t] = 1.0
                     self.r[t]       = (self.gamma_n[t] + self.e[t]**2 / self.Q[t]) / (self.gamma_n[t] + 1)
                  
@@ -305,21 +324,23 @@ class FFBS(object):
             
         # The last thing we want to do is tabulate the current
         # step's contribution to the overall log-likelihood.
-        if self.obs_discount:
-            # We need the shape parameters for the preceding time step in the current
-            # timestep's calculation of the log likelihood. This just offsets the 
-            # vector of shape parameters.
-            shifted_gamma = np.roll(np.squeeze(self.gamma_n),1)
-            shifted_gamma[0]  = 1.0
-            self.log_likelihood = student_t.logpdf(np.squeeze(self.e),
-                                                      shifted_gamma,
-                                                      scale=np.squeeze(np.sqrt(self.Q)))
-        else:
-            self.log_likelihood = norm.logpdf(np.squeeze(self.e), 
-                                                 scale=np.squeeze(np.sqrt(self.Q)))
-            
-        # This is the marginal model likelihood.
-        self.ll_sum = np.sum(self.log_likelihood)
+        
+        if self.calculate_ll:
+            if self.obs_discount:
+                # We need the shape parameters for the preceding time step in the current
+                # timestep's calculation of the log likelihood. This just offsets the 
+                # vector of shape parameters.
+                shifted_gamma = np.roll(np.squeeze(self.gamma_n),1)
+                shifted_gamma[0]  = 1.0
+                self.log_likelihood = student_t.logpdf(np.squeeze(self.e),
+                                                          shifted_gamma,
+                                                          scale=np.squeeze(np.sqrt(self.Q)))
+            else:
+                self.log_likelihood = norm.logpdf(np.squeeze(self.e), 
+                                                     scale=np.squeeze(np.sqrt(self.Q)))
+
+            # This is the marginal model likelihood.
+            self.ll_sum = np.sum(self.log_likelihood)
         
         if self.nancheck:
             try:
@@ -340,8 +361,7 @@ class FFBS(object):
         of the DLM state vector after we have made a first pass over the
         data with the forward_filtering method."""
         
-        # TODO: add in retrospective analysis for unknown variance
-        
+    
         # None of the necessary estimates required for the BS step will be ready
         # if we haven't already applied the forward filtering.
         try:
@@ -510,5 +530,46 @@ class FFBS(object):
         return plt.gca()
 
         
-
+class GridSearchDiscountFFBS(object):
+    """This class is designed to simplify the selection of discount factors
+    in the case of unknown observational and evolution variance for the DLM.
+    Currently, only an exhaustive grid search is allowed."""
+    # TODO: implement latin hypercube sampling and allow for distinct
+    # TODO: break this into an initialization and an optimization method
+    
+    # model subcomponent evolution variances.
+    def __init__(self, evo_discount_range, obs_discount_range,
+                 F,G,Y,m0,C0,s0 = 1.0):
+        
+               
+        self.evo_list = list(evo_discount_range)
+        self.obs_list = list(obs_discount_range)
+        
+         
+        # The product iterator needs to be explictly enumerated. 
+        # the call to list() forces the evaluation.
+        self.combinations = list(itertools.product(evo_discount_range,obs_discount_range))
+        self.num_combinations = len(self.combinations)
+        self.log_likelihoods = np.zeros(self.num_combinations)
+        self.models = []
+        
+        for i,pair in enumerate(self.combinations):
+            
+            # A valid discount factor is defined over (0,1]
+            assert (pair[0] <= 1.0 and pair[0] > 0.0)
+            assert (pair[1] <= 1.0 and pair[0] > 0.0)
+            
+            ffbs_model = FFBS(F,G,Y,m0,C0,s0=s0,
+                              evo_discount_factor = [pair[0]],
+                              obs_discount_factor = pair[1])
+            
+            ffbs_model.forward_filter()
+            self.models.append(ffbs_model)
+            self.log_likelihoods[i] = ffbs_model.ll_sum
+        
+        best_index = np.argmax(self.log_likelihoods)
+        best = self.combinations[best_index]
+        self.best_evo   = best[0]
+        self.best_obs   = best[1]
+        self.best_model = self.models[best_index]
 

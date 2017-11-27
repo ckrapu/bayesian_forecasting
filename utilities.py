@@ -1,24 +1,23 @@
-import itertools
-import shapely
-import fiona
-import geopandas as gpd
-from oauth2client.client import GoogleCredentials
 import ee
-import pandas as pd
-import theano.tensor as tt
-from theano.compile.ops import as_op
-import theano
-from scipy.stats import invgamma,genextreme
-from ipywidgets import IntProgress, HTML, VBox
-from IPython.display import display
-import numpy as np
-from scipy.linalg import circulant
+import fiona
+import geopandas         as gpd
+import itertools
 import matplotlib.pyplot as plt
-import ulmo
+import numpy             as np
+import pandas            as pd
+import shapely
 import sys
+import theano
+import theano.tensor     as tt
+import ulmo
 
+from IPython.display               import display
+from ipywidgets                    import IntProgress, HTML, VBox
+from oauth2client.client           import GoogleCredentials
 from pymc3.distributions.dist_math import bound
-
+from scipy.linalg                  import circulant
+from scipy.stats                   import invgamma,genextreme
+from theano.compile.ops            import as_op
 
 def trace_nonzero(trace,ci=95.0,axis=0):
     assert len(trace.shape) == 2
@@ -386,10 +385,9 @@ def retrieveGridmetAtLocations(latitudes,longitudes,returnFrames,**kwargs):
     else:
         return bigdf
 
-def tsSamplesPlot(tsSamples,timeIndex = None,upperPercentile = 95, lowerPercentile = 5,ax = None):
+def tsSamplesPlot(tsSamples,timeIndex = None,upperPercentile = 95, lowerPercentile = 5,ax = None,color ='k',median_label = 'Median',fill_label = '90% CI',fill_alpha = 0.25):
 
     if len(tsSamples.shape) > 2:
-
         tsSamples = np.squeeze(tsSamples)
         
     if timeIndex is None:
@@ -399,17 +397,20 @@ def tsSamplesPlot(tsSamples,timeIndex = None,upperPercentile = 95, lowerPercenti
     lower  = np.percentile(tsSamples,lowerPercentile,axis=0)
     median = np.percentile(tsSamples,50,axis=0)
     if ax is None:
-        plt.plot(timeIndex,upper,linestyle ='--',color='0.4',linewidth = 2)
-        plt.plot(timeIndex,lower,linestyle ='--',color='0.4',linewidth = 2)
-        plt.fill_between(timeIndex,upper,lower,where=upper>lower,facecolor='0.8',label = '{0} to {1} percentile range'.format(upperPercentile,lowerPercentile))
-        plt.plot(timeIndex,median,color='k',linewidth = 3,label = 'Median')
-        plt.legend(loc = 'upper right')
+        plt.plot(timeIndex,upper,linestyle ='--',color=color,linewidth = 2)
+        plt.plot(timeIndex,lower,linestyle ='--',color=color,linewidth = 2)
+        plt.fill_between(timeIndex,upper,lower,
+                         where=upper>lower,facecolor=color,alpha = fill_alpha,label = fill_label)
+        plt.plot(timeIndex,median,color=color,linewidth = 3,label = median_label)
+        plt.legend(loc='upper center', bbox_to_anchor=(0.5, -0.05),
+          fancybox=True, shadow=True, ncol=5)
         return plt.gca()
     else:
-        plt.plot(timeIndex,upper,linestyle ='--',color='0.4',linewidth = 2,axes=ax)
-        plt.plot(timeIndex,lower,linestyle ='--',color='0.4',linewidth = 2,axes=ax)
-        plt.fill_between(timeIndex,upper,lower,where=upper>lower,facecolor='0.8',label = '{0} to {1} percentile range'.format(upperPercentile,lowerPercentile),axis=ax)
-        plt.plot(timeIndex,median,color='k',linewidth = 3,label = 'Median',axes=ax)
+        plt.plot(timeIndex,upper,linestyle ='--',color=color,linewidth = 2,axes=ax)
+        plt.plot(timeIndex,lower,linestyle ='--',color=color,linewidth = 2,axes=ax)
+        plt.fill_between(timeIndex,upper,lower,
+                         where=upper>lower,facecolor=color,alpha = fill_alpha,label = fill_label,axis=ax)
+        plt.plot(timeIndex,median,color=color,linewidth = 3,label = median_label,axes=ax)
     return ax
 
 def get_ghcn_data(upper_latitude,lower_latitude,left_longitude,right_longitude,country=None,element = 'TMAX',**kwargs):
@@ -511,7 +512,8 @@ def multi_impute_maxes(frame,daily_limit = 15,annual_limit = 1,
     
 def inverseGammaVisualize(alpha,beta):
     x = np.linspace(invgamma.ppf(0.01, alpha,scale=beta),invgamma.ppf(0.99,alpha,scale=beta), 100)
-    plt.plot(x, invgamma.pdf(x, alpha,scale=beta), 'r-', lw=5, alpha=0.6, label='IG density for alpha={0}, beta={1}'.format(alpha,beta))
+    plt.plot(x, invgamma.pdf(x, alpha,scale=beta),
+             'r-', lw=5, alpha=0.6, label='IG density for alpha={0}, beta={1}'.format(alpha,beta))
     plt.legend()
     return plt.gca()
     

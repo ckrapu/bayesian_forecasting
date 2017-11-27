@@ -89,7 +89,6 @@ class TestCases(unittest.TestCase):\
                 isOkay = False
         self.assertTrue(isOkay)
          
-    
     def test_cyclic(self):
         """ This test case attempts to model a multidecadal temperature time series 
         with a seasonal DLM of order 12 (corresponding to monthly data).
