@@ -11,7 +11,7 @@ class FFBS_sample(object):
     emissions/observations and the various DLM structures F,G,W,V. The dict
     'varnames_mapping' links the names of the relevant DLM quantities in the
     larger PyMC3 model to their desired position in the FFBS data structure."""
-    
+
     # The FFBS_sample object is only initialized once in every MCMC run.
     # Therefore, the only arguments that the constructor takes should be 
     # variables which DO NOT change across Monte Carlo samples. This is 
@@ -59,7 +59,7 @@ class FFBS_sample(object):
         # We don't need to specify the evolution and observation variances
         # and if we don't, then we'll just use a discount approach later.
         try:
-            W_varname    = varnames_mapping['W']
+            W_varname    = self.varnames_mapping['W']
             W            = self.vars[W_varname]
             evo_discount = False
             assert np.all(W > 0)
@@ -69,7 +69,7 @@ class FFBS_sample(object):
             evolution_discount = True
             
         try: 
-            V_varname    = varnames_mapping['V']
+            V_varname    = self.varnames_mapping['V']
             V            = self.vars[V_varname]
             obs_discount = False
             assert np.all(V > 0)
@@ -81,19 +81,19 @@ class FFBS_sample(object):
         
         # The prior mean, state covariance
         # and observations always need to be specified.
-        m0_varname = varnames_mapping['m0']
+        m0_varname = self.varnames_mapping['m0']
         m0         = estimate[m0_varname]
         
-        C0_varname = varnames_mapping['C0']
+        C0_varname = self.varnames_mapping['C0']
         C0         = estimate[C0_varname]
       
-        Y_varname = varnames_mapping['Y']
+        Y_varname = self.varnames_mapping['Y']
         Y         = estimate[self.Y_varname]
         
         # If there is no observational variance specified, then
         # we need to get the prior on the observational variance.
         if V is None:
-            s0_varname = varnames_mapping['s0']
+            s0_varname = self.varnames_mapping['s0']
             s0         = estimate[s0_varname]
 
         self.ffbs = ffbs(F,G,Y,m0,C0,W=W,V=V,s0=s0,
@@ -113,8 +113,6 @@ class FFBS_sample(object):
         new_estimate[state_varname] = new_state
 
         return new_estimate
-  
-
 
 class FFBS(object):
     def __init__(self,F,G,Y,m0,C0,nancheck = True,check_cov_pd=False,
@@ -448,7 +446,8 @@ class FFBS(object):
                 for t in range(T-2,-1,-1):
                     self.t = t
                     self.sample_B     = self.C[t].dot(self.G.T).dot(np.linalg.inv(self.R[t+1]))
-                    self.sample_C[t]  = self.sample_v * (self.C[t] - self.sample_B.dot(self.sample_C[t] - self.R[t+1]).dot(self.sample_B.T)) / self.s[t]
+                    #self.sample_C[t]  = self.sample_v * (self.C[t] - self.sample_B.dot(self.sample_C[t] - self.R[t+1]).dot(self.sample_B.T)) / self.s[t]
+                    self.sample_C[t]  = self.sample_v * (self.C[t] - self.sample_B.dot(self.R[t+1]).dot(self.sample_B.T)) / self.s[t]
                     self.sample_m[t]  = self.m[t] + self.sample_B.dot(self.theta[t+1,:,i] - self.a[t+1])
                     self.theta[t,:,i] = np.random.multivariate_normal(self.sample_m[t], self.sample_C[t])
 
