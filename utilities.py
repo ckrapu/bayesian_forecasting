@@ -19,7 +19,23 @@ from scipy.linalg                  import circulant
 from scipy.stats                   import invgamma,genextreme
 from theano.compile.ops            import as_op
 
-
+def directory_ghcn_to_frame(input_directory,output_filename):
+    """ This function is used to take a directory 'input_directory' of GHCN climate data
+    per-station records and aggregate them into a single pandas dataframe
+    which will be pickled and saved to 'output_filename'."""
+    frames  = []
+    id_list = []
+    for filename in u.log_progress(os.listdir(input_directory),every=1):
+        if filename.split['.'][1] == 'csv':
+            station_id = filename.split('.')[0]
+            df = pd.read_csv(file_directory + filename)
+            df['month_period'] = pd.to_datetime(df['month_period'])
+            df = df.set_index('month_period')
+            frames.append(df)
+            id_list.append(station_id)
+    merged = pd.concat(frames,axis=1)
+    merged.to_pickle(output_filename)
+    return id_list
 
 def ortho_poly_fit(x, degree = 1):
     """ This function takes in a vector x and computes an orthogonal
