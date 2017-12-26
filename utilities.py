@@ -5,6 +5,7 @@ import itertools
 import matplotlib.pyplot as plt
 import numpy             as np
 import pandas            as pd
+import os
 import shapely
 import sys
 import theano
@@ -13,31 +14,87 @@ import ulmo
 
 from IPython.display               import display
 from ipywidgets                    import IntProgress, HTML, VBox
+from matplotlib                    import gridspec
 from oauth2client.client           import GoogleCredentials
 from pymc3.distributions.dist_math import bound
 from scipy.linalg                  import circulant
 from scipy.stats                   import invgamma,genextreme
 from theano.compile.ops            import as_op
 
+def parameter_forecast_plot(model_obj,time_index,start,end,num_samples = 100,cached_samples=None,col_labels = ['P','PET','Lag-1 Q','Lag-1 P','Seasonal','P$^2$','Constant']):
+    """ Just a big, ugly function to make a bunch of plots related to 
+    monthly/weekly streamflow forecasts for a single basin."""
+    
+    f = plt.figure(figsize = (8,10))
+    num_components = len(col_labels)
+    gs = gridspec.GridSpec(8+2*num_components,6)
+    ax0 = plt.subplot(gs[-8:-6,:])
+    ax1 = plt.subplot(gs[-6::,:])
+    col_labels = ['P','PET','Lag-1 Q','Lag-1 P','Seasonal','P$^2$','Constant']
+    ffbs = model_obj # 120 is French Broad River at Blantyre, NC
+    if cached_samples is None:
+        samples = ffbs.backward_sample(num_samples=num_samples)
+    else: 
+        samples = cached_samples
+    for i in range(7):
+        ax_new = plt.subplot(gs[2*i:2*i+2,:])
+
+        upper = np.percentile(samples[start:end,i,:],75,axis = 1)
+        mid   = np.percentile(samples[start:end,i,:],50,axis = 1)
+        lower = np.percentile(samples[start:end,i,:],25,axis = 1)
+
+        ax_new.plot(time_index[start:end],mid,color='k')
+        ax_new.fill_between(time_index[start:end],upper,lower,color='0.8')
+        ax_new.tick_params(labelbottom=False,direction='in')
+        ax_new.text(0.02, 0.82,col_labels[i],
+                    horizontalalignment='left',
+                    verticalalignment='center',transform=ax_new.transAxes)
+
+    ax1.plot(time_index[start:end],ffbs.f[start:end],color='k',label='1-step forecast')
+    ax1.plot(time_index[start:end],ffbs.Y[start:end],color='k',linestyle='',marker='+',
+             markersize = 10,label='Observed streamflow')
+
+    ax1.fill_between(time_index[start:end],
+                     np.squeeze(ffbs.f[start:end] + 2*ffbs.Q[start:end,0]),
+                     np.squeeze(ffbs.f[start:end] - 2*ffbs.Q[start:end,0]),color='0.8',
+                    label = 'Forecast $\pm 2V_t$')
+    ax1.tick_params(direction='in')
+    ax1.legend(loc='upper right',ncol=1,frameon=True)
+    #ax1.set_ylabel('Standardized streamflow')
+    ax1.set_xlabel('Date',fontsize=16)
+    ax1.get_yaxis().set_label_coords(-0.1,0.5)
+    ax1.text(0.02, 0.92,'Standardized streamflow',
+                    horizontalalignment='left',
+                    verticalalignment='center',transform=ax1.transAxes,)
+    ax0.plot(time_index[start:end],ffbs.s[start:end],color='k')
+    ax0.text(0.02, 0.82,'$E[V_t]$',
+                    horizontalalignment='left',
+                    verticalalignment='center',transform=ax0.transAxes,)
+    ax0.get_yaxis().set_label_coords(-0.1,0.5)
+    return f,samples
 def directory_ghcn_to_frame(input_directory,output_filename):
     """ This function is used to take a directory 'input_directory' of GHCN climate data
     per-station records and aggregate them into a single pandas dataframe
     which will be pickled and saved to 'output_filename'."""
     frames  = []
     id_list = []
-    for filename in u.log_progress(os.listdir(input_directory),every=1):
-        if filename.split['.'][1] == 'csv':
+    for filename in log_progress(os.listdir(input_directory),every=1):
+        if filename.split('.')[1] == 'csv':
             station_id = filename.split('.')[0]
-            df = pd.read_csv(file_directory + filename)
-            df['month_period'] = pd.to_datetime(df['month_period'])
-            df = df.set_index('month_period')
-            frames.append(df)
-            id_list.append(station_id)
+            try:
+                
+                df = pd.read_csv(input_directory + filename)
+                df['month_period'] = pd.to_datetime(df['month_period'])
+                df = df.set_index('month_period')
+                frames.append(df)
+                id_list.append(station_id)
+            except:
+                print 'Station {0} could not be processed.'.format(station_id)
     merged = pd.concat(frames,axis=1)
     merged.to_pickle(output_filename)
     return id_list
 
-def ortho_poly_fit(x, degree = 1):
+def ortho_poly_fit(x, degree = 1,center = False):
     """ This function takes in a vector x and computes an orthogonal
     polynomial representation (of degree 'degree') of the elementwise powers of x in such
     a way that all the resulting vectors are uncorrelated. Typically 
@@ -49,7 +106,8 @@ def ortho_poly_fit(x, degree = 1):
     if(degree >= len(np.unique(x))):
             stop("'degree' must be less than number of unique points")
     xbar = np.mean(x)
-    x = x - xbar
+    if center:
+        x = x - xbar
     X = np.fliplr(np.vander(x, n))
     q,r = np.linalg.qr(X)
 
@@ -60,6 +118,17 @@ def ortho_poly_fit(x, degree = 1):
     alpha = (np.sum((raw**2)*np.reshape(x,(-1,1)), axis=0)/norm2 + xbar)[:degree]
     Z = raw / np.sqrt(norm2)
     return Z, norm2, alpha
+
+def orthoPolyPower(x,power):
+    """Computes the elementwise square of x and 
+    subtracts off the parts that lie in the subspace
+    spanned by x. This can be used to obtain a squared
+    version of x that is not correlated with x."""
+    y = x**power
+    x_normalized = x / np.dot(x,x) ** 0.5
+    ortho = y - np.dot(x_normalized,y) * x_normalized
+    orthonormal = ortho / np.dot(ortho,ortho)**0.5
+    return orthonormal
 
 def ortho_poly_predict(x, alpha, norm2, degree = 1):
     """ This function is used in conjunction with ortho_poly_fit to project
@@ -88,7 +157,7 @@ def the_only_function_you_need(filepath ='/home/ubuntu/Dropbox/coursework/sta642
     usa     = gpd.read_file(filepath)
     usa     = usa.set_index('STATE_NAME')
     usa     = usa.drop(['Hawaii','Alaska'],axis=0)
-    ax      = usa.plot(color='w',figsize = (20,7),edgecolor='k')
+    ax      = usa.plot(color='w',edgecolor='k')
     return ax
 
 def gaussianKernel(dist,c):

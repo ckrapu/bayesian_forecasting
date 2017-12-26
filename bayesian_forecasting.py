@@ -119,7 +119,7 @@ class FFBS(object):
                  evolution_discount=True,obs_discount = True,
                  evo_discount_factor = [0.98],obs_discount_factor = 0.98,
                  W=None,V=None,s0 = 1.0,warn_G_singular = False,dynamic_G = False,
-                 calculate_ll = True):
+                 calculate_ll = True,model_id = None):
         
         # The convention we are using is that F  must be specified as a sequence
         # of [n,r] arrays respectively.
@@ -141,18 +141,19 @@ class FFBS(object):
             # This is the case where we want a single G matrix for all time.
             assert len(G.shape) == 2
          
-        self.check_cov_pd         = check_cov_pd        # Do we want to warn if covariance is not positive definite?
-        self.evolution_discount   = evolution_discount  # Discount factor for state evolution variance
-        self.obs_discount      = obs_discount     # Is the observational variance observed?
+        self.check_cov_pd         = check_cov_pd          # Do we want to warn if covariance is not positive definite?
+        self.evolution_discount   = evolution_discount    # Discount factor for state evolution variance
+        self.obs_discount         = obs_discount          # Is the observational variance observed?
         self.warn_G_singular      = warn_G_singular       # Warning for G not being singular
-        self.dynamic_G            = dynamic_G           # Is G allowed to vary over time?
-        self.obs_discount_factor              = obs_discount_factor             # Discount factor for observational variance
-        self.s0              = s0             # Prior point estimate of observational variance
-        self.calculate_ll    = calculate_ll   # Allows us to turn off likelihood calculations if too slow
-        
+        self.dynamic_G            = dynamic_G             # Is G allowed to vary over time?
+        self.obs_discount_factor  = obs_discount_factor   # Discount factor for observational variance
+        self.evo_discount_factor  = evo_discount_factor   # Discount factor for system evolution variance
+        self.s0                   = s0                    # Prior point estimate of observational variance
+        self.calculate_ll         = calculate_ll          # Allows us to turn off likelihood calculations if too slow
+        self.model_id             = model_id              # Set this to anything you want
         self.is_filtered          = False
         self.is_backward_smoothed = False
-        self.nancheck             = nancheck # Determines whether we check to see if NaNs have appeared
+        self.nancheck             = nancheck              # Determines whether we check to see if NaNs have appeared
  
         # The dimension of the observed series needs to be determined here.
         # Most of the code will only work for the univariate case; the 
@@ -175,7 +176,7 @@ class FFBS(object):
         if self.obs_discount: 
             assert V is None
             self.s0 = s0
-                  
+                 
         else:
             self.V    = V    # Static observation variance with dimension [r,r]
             
@@ -194,7 +195,7 @@ class FFBS(object):
                 except np.linalg.LinAlgError:
                     print 'A discount factor was specified but G is singular. Retrospective analysis will not be reliable.'
         else:
-            # Fire of an error if the evolution variance is not specified one way or another.
+            # Fire off an error if the evolution variance is not specified one way or another.
             if W is None:
                 raise ValueError('Neither a discount factor nor evolution variance matrix has been specified.')
             else:
@@ -322,7 +323,6 @@ class FFBS(object):
             
         # The last thing we want to do is tabulate the current
         # step's contribution to the overall log-likelihood.
-        
         if self.calculate_ll:
             if self.obs_discount:
                 # We need the shape parameters for the preceding time step in the current
@@ -372,7 +372,7 @@ class FFBS(object):
         # s_r and n_r are used only if the observational variance is constant but unknown.   
         self.m_r =  np.zeros([self.T,self.n])         # Retrospective mean over state distribution
         self.C_r =  np.zeros([self.T,self.n,self.n])  # Retrospective posterior covariance over state
-        self.s_r =  np.zeros(self.T)                  # Retrospective smoothed estimate of variance
+        self.s_r =  np.zeros(self.T)                  # Retrospective smoothed estimate of observational variance
         self.n_r =  np.zeros(self.T)                  # Retrospective smoothed degrees of freedom
         
         # The loop runs from the final time step to the first.
@@ -390,7 +390,7 @@ class FFBS(object):
                     self.C_r[t] = self.C[t]
                     
                     if self.obs_discount:
-                        # Set smoothed estimate of variance to be 
+                        # Set smoothed estimate of observational variance to be 
                         # the last forward-filtered estimate of variance
                         self.s_r[t] = self.s[t]
                         self.n_r[t] = self.gamma_n[t]
@@ -432,6 +432,8 @@ class FFBS(object):
                 # First, we draw a sample variance by making a gamma draw from the 
                 # posterior over the precision and inverting it.
                 self.sample_precision = np.random.gamma(self.gamma_n[-1]/2.0,scale = 2.0 / (self.gamma_n[-1]*self.s[-1]))
+                
+                # TODO: implement backward sampling of variances
                 self.sample_v = 1.0 / self.sample_precision
 
                 # At the beginning (aka the last time step) we assume that the prior
@@ -446,13 +448,13 @@ class FFBS(object):
                 for t in range(T-2,-1,-1):
                     self.t = t
                     self.sample_B     = self.C[t].dot(self.G.T).dot(np.linalg.inv(self.R[t+1]))
-                    #self.sample_C[t]  = self.sample_v * (self.C[t] - self.sample_B.dot(self.sample_C[t] - self.R[t+1]).dot(self.sample_B.T)) / self.s[t]
                     self.sample_C[t]  = self.sample_v * (self.C[t] - self.sample_B.dot(self.R[t+1]).dot(self.sample_B.T)) / self.s[t]
                     self.sample_m[t]  = self.m[t] + self.sample_B.dot(self.theta[t+1,:,i] - self.a[t+1])
                     self.theta[t,:,i] = np.random.multivariate_normal(self.sample_m[t], self.sample_C[t])
 
             else:
-                # The backward sampling is much simpler if the observational variance is known.
+                # The backward sampling is much simpler if the observational variance is known 
+                # and the code below uses a known observational variance.
                 # see page 130 in Prado & West for the details.
                 self.sample_m[-1]  = self.m[-1]
                 self.sample_C[-1]  = self.C[-1]
@@ -533,10 +535,9 @@ class GridSearchDiscountFFBS(object):
     """This class is designed to simplify the selection of discount factors
     in the case of unknown observational and evolution variance for the DLM.
     Currently, only an exhaustive grid search is allowed."""
-    # TODO: implement latin hypercube sampling and allow for distinct
+    # TODO: implement latin hypercube sampling and allow for distinct block discount factors
     # TODO: break this into an initialization and an optimization method
     
-    # model subcomponent evolution variances.
     def __init__(self, evo_discount_range, obs_discount_range,
                  F,G,Y,m0,C0,s0 = 1.0):
         
@@ -546,7 +547,7 @@ class GridSearchDiscountFFBS(object):
         
          
         # The product iterator needs to be explictly enumerated. 
-        # the call to list() forces the evaluation.
+        # the call to list() forces the evaluation.s
         self.combinations = list(itertools.product(evo_discount_range,obs_discount_range))
         self.num_combinations = len(self.combinations)
         self.log_likelihoods = np.zeros(self.num_combinations)
@@ -566,6 +567,7 @@ class GridSearchDiscountFFBS(object):
             self.models.append(ffbs_model)
             self.log_likelihoods[i] = ffbs_model.ll_sum
         
+        # We pick the model with the highest likelihood
         best_index = np.argmax(self.log_likelihoods)
         best = self.combinations[best_index]
         self.best_evo   = best[0]
