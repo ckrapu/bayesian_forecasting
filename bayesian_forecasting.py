@@ -159,13 +159,13 @@ class FFBS(object):
         # Most of the code will only work for the univariate case; the 
         # multivariate version isn't operational yet.
         try:
-            r = Y.shape[1]
+            obs_dim = Y.shape[1]
         except IndexError:
-            r = 1
+            obs_dim= 1
                
-        self.T = Y.shape[0]   # Number of timesteps
-        self.r = r            # Observation dimension
-        self.n = m0.shape[0]  # State dimension
+        self.T         = Y.shape[0]   # Number of timesteps
+        self.obs_dim   = obs_dim            # Observation dimension
+        self.state_dim = m0.shape[0]  # State dimension
 
         # F and G always need to be specified.
         self.F    = F    # Dynamic regression vectors
@@ -206,9 +206,9 @@ class FFBS(object):
         # If there is only one delta passed in, then we'll use it as the 
         # global discount factor.
         if len(evo_discount_factor) == 1:
-            self.discount_matrix = np.identity(self.n) *(1.0 /  evo_discount_factor[0])
+            self.discount_matrix = np.identity(self.state_dim) *(1.0 /  evo_discount_factor[0])
 
-        elif len(evo_discount_factor) == self.n:
+        elif len(evo_discount_factor) == self.state_dim:
             # The diagonal entries of the discount matrix need to be 
             # 1/delta. We just invert a diagonal matrix to get that.
             self.discount_matrix = np.linalg.inv(np.diag(evo_discount_factor))
@@ -219,17 +219,11 @@ class FFBS(object):
         else:
             raise ValueError('Evolution discount factors incorrectly specified.')
 
-            
     def forward_filter(self):
 
-        # These are just for convenience to reduce the number of times that 
-        # these static arrays are referenced. The other arrays aren't treated
-        # the same because they are frequently manipulated / changed.
-        F = self.F # Dimensions of [T,n,r]
-        Y = self.Y # Dimensions of [T,r]
-        T = self.T # Number of timesteps
-        r = self.r # Dimension of observed data
-        n = self.n # Dimension of state vector
+        T         = self.T         # Number of timesteps
+        obs_dim   = self.obs_dim   # Dimension of observed data
+        state_dim = self.state_dim # Dimension of state vector
         
         if self.obs_discount:
             self.gamma_n = np.zeros(T)
@@ -240,87 +234,23 @@ class FFBS(object):
             V = self.V # Dimensions of [r,r]
             
         self.r = np.zeros(T)       # For unknown obs. variance
-        self.e = np.zeros([T,r])   # Forecast error
-        self.f = np.zeros([T,r])   # Forecast mean
-        self.m = np.zeros([T,n])   # State vector/matrix posterior mean
-        self.a = np.zeros([T,n])   # State vector/matrix prior mean
-        self.Q = np.zeros([T,r,r]) # Forecast covariance
-        self.A = np.zeros([T,n,r]) # Adaptive coefficient vector
-        self.R = np.zeros([T,n,n]) # State vector prior variance
-        self.C = np.zeros([T,n,n]) # State vector posterior variance
-        self.B = np.zeros([T,n,n]) # Retrospective ???
+        self.e = np.zeros([T,obs_dim])   # Forecast error
+        self.f = np.zeros([T,obs_dim])   # Forecast mean
+        self.m = np.zeros([T,state_dim])   # State vector/matrix posterior mean
+        self.a = np.zeros([T,state_dim])   # State vector/matrix prior mean
+        self.Q = np.zeros([T,obs_dim,obs_dim]) # Forecast covariance
+        self.A = np.zeros([T,state_dim,obs_dim]) # Adaptive coefficient vector
+        self.R = np.zeros([T,state_dim,state_dim]) # State vector prior variance
+        self.C = np.zeros([T,state_dim,state_dim]) # State vector posterior variance
+        self.B = np.zeros([T,state_dim,state_dim]) # Retrospective ???
 
         # Forward filtering
         # For each time step, we ingest a new observation and update our priors
         # to posteriors.
         for t in range(T):
             self.t = t
-            
-            # If G varies over time, pick out the one we want.
-            if self.dynamic_G:
-                G = self.G[t]
-            else:
-                G = self.G # Dimensions of [n,n]
-
-            # If starting out, we use our initial prior mean and prior covariance.
-            prior_covariance = self.C0 if t == 0 else self.C[t-1]
-            prior_mean       = self.m0 if t == 0 else self.m[t-1]
-            self.a[t]   = G.dot(prior_mean)
-            
-            # If we use a discounting approach for the evolution variance,
-            # we just inflate our covariance matrix by a little bit 
-            # at each time step. Otherwise, we just add the innovation
-            # variance W. We do this because the covariance of the sum of 
-            # two normal RVs is equal to the elementwise sum of the covariances.
-            if self.evolution_discount:
-                self.R[t]   = G.dot(prior_covariance).dot(G.T).dot(self.discount_matrix)
-            else:
-                self.R[t]   = G.dot(prior_covariance).dot(G.T) + self.W
- 
-            # The one-step forecast 'f' involves the product of our regression 
-            # matrix F and the state vector.
-            self.f[t]   = F[t].T.dot(self.a[t])
-            self.e[t]   = self.Y[t] - self.f[t]
-            
-            # Next, we calculate the forecast covariance and forecast error.
-            # If we don't know the observational variance, then we need
-            # to keep track of the prior-to-posterior updating of our distribution
-            # over the observational variance.
-            if self.obs_discount:
-                
-                if t == 0:
-                    self.Q[t]       = F[t].T.dot(self.R[t]).dot(F[t]) + self.s0
-                    self.gamma_n[t] = 1.0
-                    self.r[t]       = (self.gamma_n[t] + self.e[t]**2 / self.Q[t]) / (self.gamma_n[t] + 1)
-                 
-                else:
-                    self.Q[t]       = F[t].T.dot(self.R[t]).dot(F[t]) + self.s[t-1]
-                    self.gamma_n[t] = self.obs_discount_factor * self.gamma_n[t-1]+1
-                    self.r[t]       = (self.gamma_n[t] + self.e[t]**2 / self.Q[t]) / (self.gamma_n[t] + 1)
-                    self.s[t]       = self.r[t] * self.s[t-1]
-            
-            # In the case where the observational variance is known, the forecast variance
-            # is expressed much more succinctly.
-            else:
-                self.Q[t]   = F[t].T.dot(self.R[t]).dot(F[t]) + V # [r,n] x [n,n] x [n,r]
-                  
-            # The ratio of R / Q gives us an estimate of the split between
-            # prior covariance and forecast covariance.
-            if self.obs_discount and t > 0 :
-                self.prefactor = self.s[t]/self.s[t-1]
-            else:
-                self.prefactor = 1.0
-            if r == 1:
-                self.A[t] = self.R[t].dot(F[t])/np.squeeze(self.Q[t])
-                self.C[t] = self.prefactor * (self.R[t] - self.A[t].dot(self.A[t].T)*np.squeeze(self.Q[t]))
-            else: # This branch is probably broken as I have not tested any of it for a mv case.
-                self.A[t] = self.R[t].dot(F[t]).dot(np.linalg.inv(self.Q[t]))
-                self.C[t] = self.prefactor * (self.R[t] - self.A[t].dot(self.Q[t]).dot(self.A[t].T))
-            
-            # The posterior mean over the state vector is a weighted average 
-            # of the prior and the error, weighted by the adaptive coefficient.            
-            self.m[t,:]   = self.a[t]+self.A[t].dot(self.e[t])
-            
+            self.filter_step(t)
+                        
         # The last thing we want to do is tabulate the current
         # step's contribution to the overall log-likelihood.
         if self.calculate_ll:
@@ -350,9 +280,75 @@ class FFBS(object):
                 
         self.is_filtered = True
         self.mae = np.mean(np.abs(self.e))
+        self.mse = np.mean((self.e)**2)
         self.r2 = r2_score(self.Y,self.f)
         
-                                                  
+    def filter_step(self,t):
+        # If G varies over time, pick out the one we want.
+        if self.dynamic_G:
+            G = self.G[t]
+        else:
+            G = self.G # Dimensions of [n,n]
+
+        # If starting out, we use our initial prior mean and prior covariance.
+        prior_covariance = self.C0 if t == 0 else self.C[t-1]
+        prior_mean       = self.m0 if t == 0 else self.m[t-1]
+        self.a[t]        = G.dot(prior_mean)
+        
+        # If we use a discounting approach for the evolution variance,
+        # we just inflate our covariance matrix by a little bit 
+        # at each time step. Otherwise, we just add the innovation
+        # variance W. We do this because the covariance of the sum of 
+        # two normal RVs is equal to the elementwise sum of the covariances.
+        if self.evolution_discount:
+            self.R[t]   = G.dot(prior_covariance).dot(G.T).dot(self.discount_matrix)
+        else:
+            self.R[t]   = G.dot(prior_covariance).dot(G.T) + self.W
+
+        # The one-step forecast 'f' involves the product of our regression 
+        # matrix F and the state vector.
+        self.f[t]   = self.F[t].T.dot(self.a[t])
+        self.e[t]   = self.Y[t] - self.f[t]
+        
+        # Next, we calculate the forecast covariance and forecast error.
+        # If we don't know the observational variance, then we need
+        # to keep track of the prior-to-posterior updating of our distribution
+        # over the observational variance.
+        if self.obs_discount:
+            
+            if t == 0:
+                self.Q[t]       = self.F[t].T.dot(self.R[t]).dot(self.F[t]) + self.s0
+                self.gamma_n[t] = 1.0
+                self.r[t]       = (self.gamma_n[t] + self.e[t]**2 / self.Q[t]) / (self.gamma_n[t] + 1)
+             
+            else:
+                self.Q[t]       = self.F[t].T.dot(self.R[t]).dot(self.F[t]) + self.s[t-1]
+                self.gamma_n[t] = self.obs_discount_factor * self.gamma_n[t-1]+1
+                self.r[t]       = (self.gamma_n[t] + self.e[t]**2 / self.Q[t]) / (self.gamma_n[t] + 1)
+                self.s[t]       = self.r[t] * self.s[t-1]
+        
+        # In the case where the observational variance is known, the forecast variance
+        # is expressed much more succinctly.
+        else:
+            self.Q[t]   = self.F[t].T.dot(self.R[t]).dot(self.F[t]) + self.V # [r,n] x [n,n] x [n,r]
+              
+        # The ratio of R / Q gives us an estimate of the split between
+        # prior covariance and forecast covariance.
+        if self.obs_discount and t > 0 :
+            self.prefactor = self.s[t]/self.s[t-1]
+        else:
+            self.prefactor = 1.0
+        if self.obs_dim == 1:
+            self.A[t] = self.R[t].dot(self.F[t])/np.squeeze(self.Q[t])
+            self.C[t] = self.prefactor * (self.R[t] - self.A[t].dot(self.A[t].T)*np.squeeze(self.Q[t]))
+        else: # This branch is probably broken as I have not tested any of it for a mv case.
+            self.A[t] = self.R[t].dot(self.F[t]).dot(np.linalg.inv(self.Q[t]))
+            self.C[t] = self.prefactor * (self.R[t] - self.A[t].dot(self.Q[t]).dot(self.A[t].T))
+        
+        # The posterior mean over the state vector is a weighted average 
+        # of the prior and the error, weighted by the adaptive coefficient.            
+        self.m[t,:]   = self.a[t]+self.A[t].dot(self.e[t])
+                                                              
         
     def backward_smooth(self):
         """ This method is used to compute retrospective estimates
@@ -370,8 +366,8 @@ class FFBS(object):
         # These are the main quantities we care about.
         # The suffix _r indicates that these are from retrospective analyses.
         # s_r and n_r are used only if the observational variance is constant but unknown.   
-        self.m_r =  np.zeros([self.T,self.n])         # Retrospective mean over state distribution
-        self.C_r =  np.zeros([self.T,self.n,self.n])  # Retrospective posterior covariance over state
+        self.m_r =  np.zeros([self.T,self.state_dim])         # Retrospective mean over state distribution
+        self.C_r =  np.zeros([self.T,self.state_dim,self.state_dim])  # Retrospective posterior covariance over state
         self.s_r =  np.zeros(self.T)                  # Retrospective smoothed estimate of observational variance
         self.n_r =  np.zeros(self.T)                  # Retrospective smoothed degrees of freedom
         
@@ -418,12 +414,12 @@ class FFBS(object):
         and backward smoothing."""
         
         T = self.T
-        self.theta = np.zeros([T,self.n,num_samples])
+        self.theta = np.zeros([T,self.state_dim,num_samples])
         
         # TODO: optimize code to vectorize the sample drawing
         for i in range(num_samples):
-            self.sample_C = np.zeros([T,self.n,self.n])
-            self.sample_m = np.zeros([T,self.n])
+            self.sample_C = np.zeros([T,self.state_dim,self.state_dim])
+            self.sample_m = np.zeros([T,self.state_dim])
 
             # Depending on whether the observational variance is known or 
             # not, we proceed using one of two different recursive sampling algorithms.
