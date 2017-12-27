@@ -534,7 +534,8 @@ class FFBS(object):
         
         return plt.gca()
     
-    def time_plot(self,deviation_multiplier = 1.645,figsize = (10,6),start_index=1,stop_index = -1):
+    def time_plot(self,deviation_multiplier = 1.645,figsize = (10,6),start_index=1,stop_index = -1,
+                 transform = None):
         """Wrapper for a plot showing the forecasted values with 90% 
         confidence interval and the observed values. The first timestep
         is ignored in order to avoid distortion from misspecified 
@@ -545,8 +546,18 @@ class FFBS(object):
         lower = np.squeeze(self.f[start_index:stop_index])-deviations
         
         plt.figure(figsize = figsize)
-        plt.plot(self.f[start_index:stop_index],linestyle='-',color='k',label='1-step forecast')
-        plt.plot(self.Y[start_index:stop_index],color='r',linestyle='',marker='o',label='Observed')
+        if transform is None:
+            forecasted = self.f[start_index:stop_index]
+            true       = self.Y[start_index:stop_index]
+        
+        else:
+            forecasted = transform(self.f[start_index:stop_index])
+            true       = transform(self.Y[start_index:stop_index])
+            lower      = transform(lower)
+            upper      = transform(upper)
+            
+        plt.plot(forecasted,linestyle='-',color='k',label='1-step forecast')
+        plt.plot(true,color='r',linestyle='',marker='o',label='Observed')
         plt.gca().fill_between(np.arange(len(deviations)),upper,lower,color='0.8',label='90% CI')
         
         plt.legend(loc='upper right')
@@ -597,8 +608,7 @@ class GridSearchDiscountFFBS(object):
             assert (pair[0] <= 1.0 and pair[0] > 0.0)
             assert (pair[1] <= 1.0 and pair[0] > 0.0)
             
-            ffbs_model = FFBS(F,G,Y,m0,C0,s0=s0,
-                              evo_discount_factor = [pair[0]],
+            ffbs_model = FFBS(F,G,Y,m0,C0,s0=s0,evo_discount_factor = [pair[0]],
                               obs_discount_factor = pair[1])
             
             ffbs_model.forward_filter()
