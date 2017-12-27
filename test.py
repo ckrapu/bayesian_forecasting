@@ -6,7 +6,7 @@ import numpy as np
 from scipy.linalg import block_diag
 import numpy.testing as npt
 
-class TestCases(unittest.TestCase):\
+class TestCases(unittest.TestCase):
     
     def test_grid_search(self):
         """ This test makes sure the discount factor grid search
@@ -57,7 +57,29 @@ class TestCases(unittest.TestCase):\
         ffbs.backward_smooth()
         ll = ffbs.ll_sum
         self.assertTrue(ll > -10.0 and ll < -4.0)
-   
+        
+    def test_append_observation(self):
+        """Test to make sure that adding a single new observation at the end of the data record
+        gives same model score as training with that observation along with all others from the
+        very start."""
+        T = 4
+        Y = np.random.randn(T)
+        F = np.identity(1)[np.newaxis,:].repeat(T,axis = 0)
+        m0 = np.zeros(1)
+        C0 = np.identity(1)
+        V = 1.0
+        G = np.identity(1)
+        ffbs = bf.FFBS(F,G,Y,m0,C0,obs_discount = False,V=V)
+        ffbs.forward_filter()
+
+
+        ffbs_partial = bf.FFBS(F[0:-1,:],G,Y[0:-1],m0,C0,obs_discount = False,V=V)
+        ffbs_partial.forward_filter()
+        new_F = F[-1,:]
+        new_Y = Y[-1]
+        ffbs_partial.append_observation(new_F,new_Y)
+        self.assertTrue(ffbs.mae,ffbs_partial.mae)
+           
     def test_ar(self):
         """ This test case simulates an AR(3) model over 10^5 timesteps with minimal variance
         and attempts to recover the original autoregression coefficients used to generate the data."""

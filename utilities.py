@@ -21,6 +21,60 @@ from scipy.linalg                  import circulant
 from scipy.stats                   import invgamma,genextreme
 from theano.compile.ops            import as_op
 
+
+def dlm_design_matrix(dataframe,target,p_order,factorize,standardize,simultaneous,constant=True):
+    """This function is intended to help make preparing the design matrix for a 
+    dynamic linear model run easier. This function is used by passing a pandas dataframe,
+    specifying the lag orders and other properties in order to return a DLM design matrix.
+    
+    Args:
+        dataframe:    a pandas dataframe with categorical or continuous predictors 
+        target:       string naming the column which is used as the response variable
+        p_order:      dict mapping each column name to the maximum lag order used in the regression
+        factorize:    list of strings designating columns to be handled as categoricals and mapped to factor variables
+        standardize:  list of strings denoting columns to be centered with unit variance
+        simultaneous: list of strings denoting columns to be used as zero-lag predictors
+        constant:     bool determining whether vector of all 1s is added to design matrix
+    
+    Returns:
+        predictors:   pandas dataframe in which each column is suitable for use as a predictor
+                      variable in a dynamic linear model"""
+    
+    
+    predictors = dataframe.copy()
+    original_names = predictors.columns
+
+    for col_name in standardize:
+        predictors[col_name] = (predictors[col_name] - predictors[col_name].mean()) / predictors[col_name].std()
+    
+    # We will crop rows for which there are no previous lagged values to regress upon,
+    # and the number of rows that we crop is the highest order lag.
+    max_lag = 0
+    for col_name in p_order.keys():
+        lag = p_order[col_name]
+        if lag > max_lag:
+            max_lag = lag 
+        for i in range(lag):
+
+            name = col_name + '_lag{0}'.format(i+1)
+            predictors[name] = np.roll(predictors[col_name],i+1)
+            
+    for col_name in factorize:
+        add_on = pd.get_dummies(frame[col_name],prefix = col_name)
+        predictors[add_on.columns] = add_on
+
+
+    for col_name in original_names:
+        if col_name not in simultaneous:
+            predictors = predictors.drop(col_name,axis = 1)
+    predictors = predictors.iloc[max_lag ::]
+    
+    if constant:
+        predictors['constant'] = 1.0
+        
+    return predictors
+
+
 def parameter_forecast_plot(model_obj,time_index,start,end,num_samples = 100,cached_samples=None,col_labels = ['P','PET','Lag-1 Q','Lag-1 P','Seasonal','P$^2$','Constant']):
     """ Just a big, ugly function to make a bunch of plots related to 
     monthly/weekly streamflow forecasts for a single basin."""

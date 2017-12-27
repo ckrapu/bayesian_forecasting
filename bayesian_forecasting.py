@@ -231,7 +231,7 @@ class FFBS(object):
             self.s[0]    = self.s0
            
         else:
-            V = self.V # Dimensions of [r,r]
+            V = self.V # Dimensions of [obs_dim,obs_dim]
             
         self.r = np.zeros(T)       # For unknown obs. variance
         self.e = np.zeros([T,obs_dim])   # Forecast error
@@ -243,6 +243,16 @@ class FFBS(object):
         self.R = np.zeros([T,state_dim,state_dim]) # State vector prior variance
         self.C = np.zeros([T,state_dim,state_dim]) # State vector posterior variance
         self.B = np.zeros([T,state_dim,state_dim]) # Retrospective ???
+        
+        # If we want to change the tracked quantities all at once later,
+        # it would be handy to be able to reference all of them at the 
+        # same time.
+        self.dynamic_names = ['F','Y','r' , 'e', 'f' ,'m' ,'a', 'Q', 'A', 'R','C','B']
+        
+        if self.obs_discount:
+            self.dynamic_names = self.dynamic_names + ['gamma_n','s']
+        if self.dynamic_G:
+            self.dynamic_names = self.dynamic_names + ['G']
 
         # Forward filtering
         # For each time step, we ingest a new observation and update our priors
@@ -277,8 +287,12 @@ class FFBS(object):
                           
             except AssertionError:
                 print 'NaN values encountered in forward filtering.'
-                
+        
+        self.populate_scores()
+        
         self.is_filtered = True
+        
+    def populate_scores(self):
         self.mae = np.mean(np.abs(self.e))
         self.mse = np.mean((self.e)**2)
         self.r2 = r2_score(self.Y,self.f)
@@ -330,8 +344,8 @@ class FFBS(object):
         # In the case where the observational variance is known, the forecast variance
         # is expressed much more succinctly.
         else:
-            self.Q[t]   = self.F[t].T.dot(self.R[t]).dot(self.F[t]) + self.V # [r,n] x [n,n] x [n,r]
-              
+            self.Q[t]   = self.F[t].T.dot(self.R[t]).dot(self.F[t]) + self.V #
+            
         # The ratio of R / Q gives us an estimate of the split between
         # prior covariance and forecast covariance.
         if self.obs_discount and t > 0 :
@@ -348,7 +362,35 @@ class FFBS(object):
         # The posterior mean over the state vector is a weighted average 
         # of the prior and the error, weighted by the adaptive coefficient.            
         self.m[t,:]   = self.a[t]+self.A[t].dot(self.e[t])
-                                                              
+        
+    def append_observation(self,new_F, new_y):
+        
+        assert self.is_filtered
+        
+        self.T = self.T + 1
+        
+        # We need to extend all of our arrays to hold the new computed values.
+        # The first axis should always be over timesteps, so we append
+        # our new data in that axis.
+        for array_name in self.dynamic_names:
+            
+            old_array   = getattr(self,array_name)
+            array_shape = old_array.shape
+            
+            # The next line makes sure our  piece to add on has the same number of
+            # dimensions as the base part. Otherwise, concatenate will hit an error.
+            addendum    = np.zeros([1] + list(array_shape[1::]))
+            setattr(self,array_name,np.append(old_array, addendum, axis = 0))
+        
+        self.F[-1] = new_F
+        self.Y[-1] = new_y
+        
+        # Last, we want to do filtering on the final timestep which we just added.
+        self.filter_step(self.T - 1)
+        
+        # And we will also update the error metrics.
+        # TODO: rewrite populate_scores so that a full recompute is not applied everytime
+        self.populate_scores()
         
     def backward_smooth(self):
         """ This method is used to compute retrospective estimates
