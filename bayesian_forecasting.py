@@ -508,6 +508,36 @@ class FFBS(object):
             assert ~np.any(np.isnan(self.theta))
                 
         return self.theta
+    def find_problem_covariance(self,array_labels = ['R','C']):
+        """Identifies timesteps with non positive semidefinite covariance matrices
+        by attempting a Cholesky decomposition"""
+        
+        is_problematic = np.zeros(self.T).astype(bool)
+        
+        for t in range(self.T):
+            
+            for string in array_labels:
+                
+                try:
+                    np.linalg.cholesky(getattr(self,string)[t,:,:])
+                except:
+                    is_problematic[t] = True
+        return is_problematic
+                
+    
+    def sample(self,timestep,num_samples = 1):
+        
+        mean     = self.f[timestep]
+        variance = self.Q[timestep]
+        stdev    = np.sqrt(variance)
+        
+        if self.obs_discount:
+            df = self.gamma_n[timestep-1]
+            sample_value = student_t.rvs(df = df, loc = mean, scale = stdev,size = num_samples)
+        else:
+            sample_value = norm.rvs(loc = mean, scale = stdev,size=num_samples)
+               
+        return np.squeeze(sample_value)
     
     
     def pred_vs_obs_plot(self,figsize =(6,6) ):
