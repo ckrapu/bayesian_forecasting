@@ -364,6 +364,9 @@ class FFBS(object):
         self.m[t,:]   = self.a[t]+self.A[t].dot(self.e[t])
         
     def append_observation(self,new_F, new_y):
+        """ If a DLM needs to have a new observation added to the end of the
+        data record (and have its filtering estimates updated), then this function
+        can be used to do so.""" 
         
         assert self.is_filtered
         
@@ -618,7 +621,7 @@ class GridSearchDiscountFFBS(object):
     # TODO: break this into an initialization and an optimization method
     
     def __init__(self, evo_discount_range, obs_discount_range,
-                 F,G,Y,m0,C0,s0 = 1.0):
+                 F,G,Y,m0,C0,s0 = 1.0,low_memory = False):
         
                
         self.evo_list = list(evo_discount_range)
@@ -632,7 +635,9 @@ class GridSearchDiscountFFBS(object):
         self.log_likelihoods = np.zeros(self.num_combinations)
         self.models = []
         
+        best_index = 0
         for i,pair in enumerate(self.combinations):
+            
             
             # A valid discount factor is defined over (0,1]
             assert (pair[0] <= 1.0 and pair[0] > 0.0)
@@ -642,13 +647,146 @@ class GridSearchDiscountFFBS(object):
                               obs_discount_factor = pair[1])
             
             ffbs_model.forward_filter()
-            self.models.append(ffbs_model)
-            self.log_likelihoods[i] = ffbs_model.ll_sum
+            current_ll = ffbs_model.ll_sum
+            self.log_likelihoods[i] = current_ll
+           
+            if i == 0:
+                highest_ll      = current_ll
+                self.best_model = ffbs_model
+                best_index      = 0
+            if current_ll > highest_ll:
+                highest_ll      = current_ll
+                self.best_model = ffbs_model
+                best_index      = i
+            
+            if not low_memory:
+                self.models.append(ffbs_model)    
+            
         
         # We pick the model with the highest likelihood
-        best_index = np.argmax(self.log_likelihoods)
         best = self.combinations[best_index]
         self.best_evo   = best[0]
         self.best_obs   = best[1]
-        self.best_model = self.models[best_index]
 
+class DynamicRegression(object):
+
+    def __init__(self,df,response_col,obs_discount_factors = [0.9,0.95,0.975,0.99,0.999,0.9999],
+                evo_discount_factors = [0.9,0.95,0.975,0.99,0.999,0.9999],informed_prior = True,
+                informed_prior_start = 0.1, informed_prior_end = 0.2):
+        """Class used to apply a dynamic regression model to a pandas dataframe.
+
+        This class is used to collect the results, parameters, plots and other data
+        for a dynamic linear regression model with observational and evolution discounting.
+        Since specification of a prior distribution on the model state and covariance can be 
+        difficult, an option is also provided to perform an initial inference run, make a summary of 
+        that posterior and use it as a prior for a more informed estimate of the parameters by snooping
+        on the data.
+
+        Attributes:
+            design (pandas dataframe): design matrix for the dynamic linear model
+            predictor_columns (list of strings): names of columns in the design matrix
+            n_predictors (int): number of predictor variables
+            T (int): number of timesteps in regression
+            F (numpy array): 3D array of design vectors for the dynamic linear model (DLM)
+            G (numpy array): 2D identity matrix for DLM state evolution
+            Y (numpy array): 1D array of responses which we model with a DLM
+            m0 (numpy array): 1D array of prior mean values for the DLM state vector
+            C0 (numpy array): 2D prior covariance matrix for the DLM state vector
+            gs (GridSearchDiscountFFBS): optimization object tabulating results of search over discount factors
+            ffbs (FFBS): FFBS object for the DLM using the best discount factors identified
+            is_filtered (bool): indicates whether or not forward filtering AND backward smoothing have been applied
+            samples (numpy array): 3D array of Monte Carlo samples of state estimates
+
+        Arguments:
+            df (pandas dataframe): dataframe with predictor variables AND response included
+            response_col (string): name of the column to be modeled with the DLM
+            obs_discount_factors (list of float): allowed values of observational variance discount factor
+            evo_discount_factors (list of float): allowed values of state evo. variance discount factor
+            informed_prior (bool): determines whether or not we cheat and snoop on the data to get an informed prior
+            informed_prior_start (float): if informed_prior is used, this is the timestep (on a scale of 0 to 1)
+                which we begin using to estimate our prior
+             informed_prior_end (float): if informed_prior is used, this is the timestep (on a scale of 0 to 1)
+                which we stop at to estimate our prior
+        """
+        self.design            = df.drop(response_col,axis = 1)
+        self.predictor_columns = self.design.columns
+        self.n_predictors      = self.design.shape[1]
+        self.T                 = self.design.shape[0]
+        
+        self.F = self.design.values[:,:,np.newaxis]
+        self.G = np.identity(self.n_predictors)
+        self.Y = df[response_col].values
+        
+        self.m0 = np.ones(self.n_predictors) * 1.0/self.n_predictors
+        self.C0 = np.identity(self.n_predictors) 
+        
+        # Find the optimal values of the evo. and obs. discount factors
+        # This uses a grid search which can take a long time.
+        self.gs = GridSearchDiscountFFBS(evo_discount_factors,obs_discount_factors,
+                                  self.F,self.G,self.Y,self.m0,self.C0)
+        
+        # If we want to 'cheat' and use the data to get a prior for our state vector
+        if informed_prior:
+            
+            begin_time = int(self.T * informed_prior_start)
+            end_time   = int(self.T * informed_prior_end)
+    
+            self.m0 = np.mean(self.gs.best_model.m[begin_time:end_time],axis = 0)
+            self.C0 = np.mean(self.gs.best_model.R[begin_time:end_time],axis = 0)
+        
+        self.ffbs = FFBS(self.F,self.G,self.Y,self.m0,self.C0,obs_discount_factor = self.gs.best_obs,
+                   evo_discount_factor = [self.gs.best_evo],
+                   obs_discount = True,evolution_discount = True)
+        
+        self.ffbs.forward_filter()
+        self.ffbs.backward_smooth()
+        self.is_filtered = True
+        self.samples     = None
+        
+    def samples_plot(self,num_samples = 500,fill_color = '0.3',fill_alpha = 0.3,upper_q = 95,
+                     lower_q = 5,width = 8,alternate_labels = None,show_subplot_labels = True):
+        """Plot the DLM state vectors over time with Monte Carlo samples to characterize uncertainty.
+        Arguments:
+            num_samples (int): number of MC samples of state vector to draw
+            fill_color (string): color for confidence interval (CI)
+            fill_alpha (float): alpha for CI
+            upper_q (int): upper percentile for confidence interval
+            lower_q (int): lower percentile for confidence interval
+            width (int): width in inches of subplots
+            alternate_labels (list of string): if the column labels in the design attribute
+                are not suitable, these will be used instead
+            show_subplot_labels (bool): determines whether or not the state elements will be 
+                labeled in this plot
+        
+        Returns:
+            figure (matplotlib figure): figure of the subplots
+        
+        """
+        assert self.is_filtered
+        
+        # Only draw samples if we need to do so; this can take awhile otherwise
+        if self.samples is None:
+            self.samples = self.ffbs.backward_sample(num_samples = num_samples)
+        
+        figure,ax = plt.subplots(self.n_predictors,figsize = (width,self.n_predictors),sharex=True)
+        ax = ax.ravel()
+        
+        if alternate_labels is None:
+            subplot_labels = self.predictor_columns
+        else:
+            subplot_labels = alternate_labels
+            
+        for i,name in enumerate(subplot_labels):
+
+            upper  = np.percentile(self.samples[:,i,:].T,upper_q,axis=0)
+            lower  = np.percentile(self.samples[:,i,:].T,lower_q,axis=0)
+            median = np.percentile(self.samples[:,i,:].T,50,axis=0)
+            
+            ax[i].fill_between(self.design.index,upper,lower,where=upper>lower,facecolor=fill_color,alpha = fill_alpha)
+            ax[i].plot(self.design.index,self.ffbs.m_r[:,i],color = 'k')
+            ax[i].tick_params(direction = 'in', width = 1, length = 5)
+            if show_subplot_labels:
+                ax[i].set_title(name)
+        plt.tight_layout()
+        
+        return figure
