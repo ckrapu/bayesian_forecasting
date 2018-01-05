@@ -21,8 +21,70 @@ from scipy.linalg                  import circulant
 from scipy.stats                   import invgamma,genextreme
 from theano.compile.ops            import as_op
 
+def parameter_compare(regressions,colors=['m','c'],upper_q=75,lower_q=25,ci_alpha = 0.2, bound_alpha = 0.0,
+                     labels = None,vertical_bbox_position = 1.4,width = 6,height = 5,draw_samples=True,num_samples =500):
+    """Plots dynamic parameter estimates for two DynamicRegression objects on the same plot.
+    
+    Arguments:
+        regressions (dict of DynamicRegressions): two regression objects to be compared
+        colors (list of strings): colors to be used for plotting medians and confidence intervals
+        upper_q (float): upper percentile for confidence interval
+        lower_q (float): lower percentile for confidence interval
+        ci_alpha (float): alpha for the confidence interval patch
+        bound_alpha (float): alpha for the lines marking the edge of the confidence interval
+        labels (list of strings): labels for each predictor column
+        vertical_bbox_position (float): nuisance parameter for adjusting where the legend sits
+        width (float): width of figure in inches
+        height (float): height of figure in inches
+        draw_samples (bool): determines whether or not fresh MC samples of states are drawn
+        num_samples (int): number of new MC samples to be drawn if draw_samples is True
+    
+    Returns:
+        figure (matplotlib figure) figure for the plots
+    """
 
-def dlm_design_matrix(dataframe,target,p_order,factorize,standardize,simultaneous,constant=True):
+    assert type(regressions) is dict
+    
+    # If no labels are provided, we take them from the first DynamicRegression object
+    if labels is None:
+        labels  = regressions[regressions.keys()[0]].predictor_columns
+        
+    # this is the number of subplots in this figure
+    n_predictors = regressions[regressions.keys()[0]].design.shape[1]
+    figure, axes = plt.subplots(n_predictors,figsize = (width,height),sharex=True)
+    
+    for i,key in enumerate(regressions.keys()):
+        
+        if draw_samples:
+            samples = regressions[key].ffbs.backward_sample(num_samples = num_samples)
+        else:
+            samples = regressions[key].ffbs.theta
+        x       = regressions[key].design.index
+        
+        for j in range(n_predictors):
+            
+            # Calculate and plot the confidence interval plus median
+            lower = np.percentile(samples[:,j,:],lower_q,axis=1)
+            upper = np.percentile(samples[:,j,:],upper_q,axis=1)
+            median = np.percentile(samples[:,j,:],50,axis=1)
+            patches[i] = axes[j].fill_between(x,upper,lower,color=colors[i],alpha = ci_alpha,
+                                              label = '{0}%-{1}% range for {2}'.format(lower_q,upper_q,key))
+            axes[j].plot(x,lower,color=colors[i],linestyle='--',alpha = bound_alpha)
+            axes[j].plot(x,upper,color=colors[i],linestyle='--',alpha = bound_alpha)
+            axes[j].plot(x,median,color=colors[i])
+            axes[j].tick_params(direction = 'in')
+
+            # a twin axis is made so we can label it easily on the right hand side of the plot
+            twin = plt.twinx(axes[j])
+            twin.set_ylabel(labels[j])
+            
+            # hide the tick labels and ticks because we only want the axis label
+            twin.set_yticks([])
+            
+    axes[0].legend(ncol=2,bbox_to_anchor=(1.00, vertical_bbox_position), borderaxespad=0.,frameon=True,edgecolor='k',fancybox=False)
+    return figure
+
+def dlm_design_matrix(dataframe,p_order,factorize=[],standardize=[],simultaneous=[],constant=True):
     """This function is intended to help make preparing the design matrix for a 
     dynamic linear model run easier. This function is used by passing a pandas dataframe,
     specifying the lag orders and other properties in order to return a DLM design matrix.
@@ -59,14 +121,15 @@ def dlm_design_matrix(dataframe,target,p_order,factorize,standardize,simultaneou
             name = col_name + '_lag{0}'.format(i+1)
             predictors[name] = np.roll(predictors[col_name],i+1)
             
-    for col_name in factorize:
-        add_on = pd.get_dummies(frame[col_name],prefix = col_name)
-        predictors[add_on.columns] = add_on
-
-
     for col_name in original_names:
         if col_name not in simultaneous:
             predictors = predictors.drop(col_name,axis = 1)
+            
+    for col_name in factorize:
+        add_on = pd.get_dummies(dataframe[col_name],prefix = col_name)
+        predictors[add_on.columns] = add_on
+        predictors = predictors.drop(col_name,axis = 1)
+
     predictors = predictors.iloc[max_lag ::]
     
     if constant:
