@@ -23,7 +23,7 @@ from theano.compile.ops            import as_op
 
 def parameter_compare(regressions,colors=['m','c'],upper_q=75,lower_q=25,ci_alpha = 0.2, bound_alpha = 0.0,
                      labels = None,vertical_bbox_position = 1.4,width = 6,height = 5,draw_samples=True,num_samples =500):
-    """Plots dynamic parameter estimates for two DynamicRegression objects on the same plot.
+    """Plots dynamic parameter estimates for two or more DynamicRegression objects on the same plot.
     
     Arguments:
         regressions (dict of DynamicRegressions): two regression objects to be compared
@@ -59,7 +59,7 @@ def parameter_compare(regressions,colors=['m','c'],upper_q=75,lower_q=25,ci_alph
             samples = regressions[key].ffbs.backward_sample(num_samples = num_samples)
         else:
             samples = regressions[key].ffbs.theta
-        x       = regressions[key].design.index
+        x = regressions[key].design.index
         
         for j in range(n_predictors):
             
@@ -67,7 +67,7 @@ def parameter_compare(regressions,colors=['m','c'],upper_q=75,lower_q=25,ci_alph
             lower = np.percentile(samples[:,j,:],lower_q,axis=1)
             upper = np.percentile(samples[:,j,:],upper_q,axis=1)
             median = np.percentile(samples[:,j,:],50,axis=1)
-            patches[i] = axes[j].fill_between(x,upper,lower,color=colors[i],alpha = ci_alpha,
+            axes[j].fill_between(x,upper,lower,color=colors[i],alpha = ci_alpha,
                                               label = '{0}%-{1}% range for {2}'.format(lower_q,upper_q,key))
             axes[j].plot(x,lower,color=colors[i],linestyle='--',alpha = bound_alpha)
             axes[j].plot(x,upper,color=colors[i],linestyle='--',alpha = bound_alpha)
@@ -81,7 +81,7 @@ def parameter_compare(regressions,colors=['m','c'],upper_q=75,lower_q=25,ci_alph
             # hide the tick labels and ticks because we only want the axis label
             twin.set_yticks([])
             
-    axes[0].legend(ncol=2,bbox_to_anchor=(1.00, vertical_bbox_position), borderaxespad=0.,frameon=True,edgecolor='k',fancybox=False)
+    axes[0].legend(ncol=len(list(regressions.keys())),bbox_to_anchor=(1.00, vertical_bbox_position), borderaxespad=0.,frameon=True,edgecolor='k',fancybox=False)
     return figure
 
 def dlm_design_matrix(dataframe,p_order,factorize=[],standardize=[],simultaneous=[],constant=True):
