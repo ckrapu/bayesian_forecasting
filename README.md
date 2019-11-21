@@ -1,2 +1,2 @@
 # bayesian_forecasting
-Bayesian time series modeling
+Bayesian filtering and prediction for dynamic linear models
